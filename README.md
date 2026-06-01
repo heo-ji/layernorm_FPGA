@@ -11,8 +11,10 @@ fpga환경에서 HIL 환경 구축
 
 ---
 
+# 사전 준비
+1. SW BERT 모델
 ```
-[e2e-bert-accel-SW] repository의 "transformers"에서 custom_norm.py, run_glue.py수정
+[e2e-bert-accel-SW] repository의 "transformers"에서 custom_norm.py, run_glue.py수정 한것임
 
 
 layernorm_FPGA\transformer\
@@ -44,33 +46,30 @@ pip install -e . //global python에서 하지 않도록 주의!
 cd src
 bash run_glue_FXP_sst2.sh
 ```
----
-
-zcu111보드의 pynq버전 2.1이상이면
-PYNQ에서는 .bit + .hwh 두 개 (파일명 base name이 같게!) 옮겨놓는다.
-
-layernorm_FPGA\FPGA_block_design\
-├── layernorm_HIL.bit
-├── layernorm_HIL.hwh
+2. Bitstream, PS 제어코드 준비
 
 ```
-layernorm_FPGA_v2/
-├── zcu111_ps_pynq.py          ← PS에서 실행 (SSH로 보드에 복사)
+layernorm_FPGA\
+├── zcu111_ps_pynq.py          ← PS의 PL제어
 ├── FPGA_block_design/
 │   ├── layernorm_HIL.bit
 │   └── layernorm_HIL.hwh
 └── transformer/src/
+    ├── run_glue_FXP_sst2.sh    ← sst2 실행용 bash파일
     ├── run_glue.py             ← --hw_ip, --hw_port 인수 추가됨 , --
     └── transformers/models/bert/
-        └── custom_norm.py      ← HWLayerNormClient + --layernorm_method로 "hw_mode1/2" 추가됨
+        └── custom_norm.py      ← TCP client(HWLayerNormClient) & --layernorm_method로 "hw_mode1/2" 추가됨
 
 ```
+zcu111보드의 pynq버전 2.1이상이면
+PYNQ에서는 .bit + .hwh 두 개 (파일명 base name이 같게!) 옮겨놓는다.
+
 
 # 실행 방법
-### 보드 부팅
-SD카드 : PYNQ 이미지카드 삽입
-1. 보드를 스위치 booting mode (1110)로 셋팅 + SD카드 삽입 해서 노트북 usb연결시켜
-2.  service ssh start 하면 166.104.140.13 서버에 ssh 접속 가능해짐
+### [1] 보드 부팅 ,ssh 연결
+1. SD카드 : PYNQ 이미지카드 삽입
+2. 보드를 스위치 booting mode (1110)로 셋팅 + SD카드 삽입 해서 노트북 usb연결시켜
+3.  service ssh start 하면 166.104.140.13 서버에 ssh 접속 가능해짐
 ```
 참고로
 DNS가 고정이 잘 안되면 /etc/vi ..뭐 확인해서 수정하라는데 뭔지 모르겠음
@@ -91,7 +90,8 @@ sudo vi /etc/network/interfaces
 # 또는
 sudo vi /etc/systemd/network/eth0.network
 ```
-### Bitstream 준비 (ssh 연결후)
+### [2] Bitstream 준비 
+(ssh 연결후)
 1. 166.104.144.145 Host 서버 접속 -> vivado들어가면 -zcu111이 자동으로 붙어있어서 여기서 PL을 vivado로 개발해서  
  → Generate Bitstream → .bit + .hwh 파일 생성 → (jtag로 bitstream을 보드에 업로드)
 
@@ -105,30 +105,34 @@ scp zcu111_ps_pynq.py          xilinx@166.104.140.13:/home/xilinx/layernorm/
 scp FPGA_block_design/layernorm_HIL.bit  xilinx@166.104.140.13:/home/xilinx/layernorm/
 scp FPGA_block_design/layernorm_HIL.hwh  xilinx@166.104.140.13:/home/xilinx/layernorm/
 ```
-### 실행
+### [3] 실행
 
-1. 166.104.144.145 Host 서버 접속 + docker/conda 가상환경 셋팅
+1. 166.104.144.145 Host 서버 접속 + 가상환경(docker,conda,..) 셋팅 : 터미널1 (145서버)
 ```
 conda create -n bert_hw python=3.10
 conda activate bert_hw
 ```
-2. custom transformer src 코드로 실행되게 함
+2. custom transformer src 코드로 실행되게 함 : 터미널1 (145서버)
 ```
 cd transformer
 pip install -e . //global python에서 하지 않도록 주의!
 cd src
 ```
 
-3. ps에서  zcu111_ps_pynq.py 실행 : 터미널 1 (145서버 → 보드 SSH)
+3. ps에서  zcu111_ps_pynq.py 실행 : 터미널 2 (145서버 → 보드 SSH)
 ```
 ssh xilinx@166.104.140.13
 python3 /home/xilinx/layernorm/zcu111_ps_pynq.py
 
 = TCP가 blocking으로 유지됨
 ```
-4. Host PC에서 run_glue.py 실행 : 터미널2 (145서버)
+4. Host PC에서 run_glue.py 실행 : 터미널1 (145서버)  
+```
+run_glue_FXP_sst2.sh
+```
 
-`Mode 1: HW 출력이 다음 레이어로 전달 (실제 HW accuracy)`
+**< layernorm HW MODE 설명 >** 
+1. Mode 1: HW 출력이 다음 레이어로 전달 (실제 HW accuracy)
 ```
 python3 run_glue.py \
   --model_name_or_path ModelTC/bert-base-uncased-sst2 \
@@ -138,13 +142,13 @@ python3 run_glue.py \
   --hw_ip 166.104.140.13  --hw_port 5000 \
   --output_dir ./results/
 ```
-` Mode 2: SW 계속 흐름 + HW 오차 비교`
+2. Mode 2: SW 계속 흐름 + HW 오차 비교
 ```
 python3 run_glue.py ... --layernorm_method hw_mode2 ...
 ```
 ---
 
-# 흐름
+# 진행 흐름
 ```
 Host PC (custom_norm.py)
   float32 (B, seq_len, d_model) → × 256  → int16 row-major
