@@ -246,7 +246,14 @@ class ModelArguments:
     )
     ###추가함
     layernorm_method: Optional[str] = field(
-        default="original", metadata={"help": " layernorm method to use: 'original' or 'custom_invsqrt_norm' or 'dualpath_norm' "}
+        default="original", metadata={"help": " layernorm method to use: 'original' or 'custom_invsqrt_norm' or 'dualpath_norm' or 'hw_mode1' or 'hw_mode2' "}
+    )
+    ###추가함 (HIL HW 연결 설정)
+    hw_ip: Optional[str] = field(
+        default="166.104.140.13", metadata={"help": "ZCU111 PS IP 주소 (hw_mode1/2 사용 시)"}
+    )
+    hw_port: Optional[int] = field(
+        default=5000, metadata={"help": "ZCU111 PS TCP 포트 (hw_mode1/2 사용 시)"}
     )
 
 
@@ -420,9 +427,14 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
-    config.softmax_method = model_args.softmax_method   ###추가함
-    config.layernorm_method = model_args.layernorm_method   ###추가함
-    config.hidden_act = model_args.hidden_act   ###추가함
+    config.softmax_method = model_args.softmax_method         ###추가함
+    config.layernorm_method = model_args.layernorm_method     ###추가함
+    config.hidden_act = model_args.hidden_act                 ###추가함
+
+    ###추가함 (HIL HW 연결 초기화)
+    if model_args.layernorm_method in ('hw_mode1', 'hw_mode2'):
+        from transformers.models.bert.custom_norm import HWLayerNormClient
+        HWLayerNormClient.connect(ip=model_args.hw_ip, port=model_args.hw_port)
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,

@@ -28,7 +28,7 @@ class HWLayerNormClient:
     ZCU111 PS와 TCP 통신하는 싱글톤 클라이언트.
 
     사용법 (run_glue.py 에서 한 번만 호출):
-        HWLayerNormClient.connect(ip='192.168.1.100', port=5000)
+        HWLayerNormClient.connect(ip='166.104.140.13', port=5000)
 
     프로토콜:
         송신: [seq_len(uint16 LE)][d_model(uint16 LE)] + seq_len*d_model*int16 (row-major)
@@ -56,15 +56,15 @@ class HWLayerNormClient:
 
     def run(self, x_np: np.ndarray) -> np.ndarray:
         """
-        x_np : (seq_len, d_model) float32
-        return : (seq_len, d_model) float32  (HW LayerNorm 출력, weight/bias 미적용)
+        TCP 송수신만 담당.
+
+        x_np   : (seq_len, d_model)  float (값이 이미 ×256 클리핑된 상태)
+        return : (seq_len, d_model)  int16 numpy
         """
         seq_len, d_model = x_np.shape
 
-        # float32 → int16 (8.8 fixed-point, ×256)
-        int16_data = np.clip(
-            np.round(x_np * 256.0), -32768, 32767
-        ).astype(np.int16)
+        # 호출 측에서 이미 ×256 + clip 완료 → int16 캐스팅도 앞에서함
+        int16_data = x_np #.astype(np.int16)
 
         # 헤더: seq_len, d_model (uint16 little-endian)
         header = struct.pack('<HH', seq_len, d_model)
@@ -72,12 +72,9 @@ class HWLayerNormClient:
         # 송신: 헤더 + row-major int16 바이트열
         self.sock.sendall(header + int16_data.tobytes())
 
-        # 수신: seq_len × d_model × 2 바이트
+        # 수신: seq_len × d_model × 2 바이트 → int16 반환
         raw = _recv_exact(self.sock, seq_len * d_model * 2)
-        out_int16 = np.frombuffer(raw, dtype=np.int16).reshape(seq_len, d_model)
-
-        # int16 → float32 (÷256)
-        return out_int16.astype(np.float32) / 256.0
+        return np.frombuffer(raw, dtype=np.int16).reshape(seq_len, d_model).copy()
 
     def close(self):
         self.sock.close()
@@ -473,8 +470,198 @@ class Custom_LayerNorm(Module):
             return self.forward_fxp88(input)
         elif self.method == 'dualpath_norm':
             return self.forward_dual_path(input)
+        elif self.method == 'hw_mode1':
+            return self.forward_hw_mode1(input)
+        elif self.method == 'hw_mode2':
+            return self.forward_hw_mode2(input)
         else:
             raise ValueError(f"Unsupported method: {self.method}")
+
+    # ── HW Mode 1 : HW 출력을 다음 레이어로 전달 (실제 HW accuracy 측정) ──
+    def forward_hw_mode1(self, input: Tensor) -> Tensor:
+        """
+        HW LayerNorm 결과를 그대로 사용 → HW 오차가 모델 전체에 누적됨.
+        최종 accuracy = 실제 HW accuracy.
+        """
+        
+        client = HWLayerNormClient.get()
+        B = input.shape[0]
+
+        # 배치 전체 float32 → int16 스케일 변환
+        input_int16 = torch.clip(input * 256, -32768, 32767)
+
+        ################# TCP -> FPGA(PS)##############################################
+        outputs = []
+        for b in range(B):
+            x_np   = input_int16[b].detach().cpu().numpy()   # (seq_len, d_model)
+            hw_out = client.run(x_np)                         # (seq_len, d_model) int16
+            outputs.append(torch.from_numpy(hw_out))
+        #############################################################################
+        # 배치 전체 int16 → float32 복원 (normalized, weight/bias 미적용)
+        normalized = torch.stack(outputs, dim=0).to(input.device).float() / 256.0
+
+        # ── weight 8.8 포맷 적용 ──────────────────────────────
+        scale_factor_8 = 2**8
+        if self.weight is not None:
+            weight = torch.floor(self.weight * scale_factor_8) / scale_factor_8  # 소수부 8
+            weight = torch.clip(weight, -2**7, 2**7 - 1/scale_factor_8)          # 정수부 8
+            out = normalized * weight
+        else:
+            out = normalized
+        out = torch.floor(out * scale_factor_8) / scale_factor_8
+        out = torch.clip(out, -2**7, 2**7 - 1/scale_factor_8)
+
+        # ── bias 8.8 포맷 적용 ───────────────────────────────
+        if self.bias is not None:
+            bias = torch.floor(self.bias * scale_factor_8) / scale_factor_8      # 소수부 8
+            bias = torch.clip(bias, -2**7, 2**7 - 1/scale_factor_8)              # 정수부 8
+            out = out + bias
+        out = torch.floor(out * scale_factor_8) / scale_factor_8
+        out = torch.clip(out, -2**7, 2**7 - 1/scale_factor_8)
+        return out
+
+    # ── HW Mode 2 : SW 값으로 계속 흐르되, HW vs SW 오차 비교 + worst-case 저장 ──
+    def forward_hw_mode2(self, input: Tensor) -> Tensor:
+        """
+        SW golden 결과로 모델이 계속 흐름 → accuracy 영향 없음.
+        오차가 최대인 입력 텐서를 저장.
+        """
+        # SW golden 계산 (weight/bias 포함 전체 결과)
+        #sw_out = self.forward_fxp88(input)
+        dmodel = input.size(2)
+        
+        scale_factor_8 = 2**8
+        scale_factor_16 = 2**16
+
+        #input = 8.8
+        input_fx16 = torch.floor(input * scale_factor_8)/scale_factor_8 #소수부8
+        input_fx16 = torch.clip(input_fx16, -2**7, 2**7 - 1/scale_factor_8) #정수부8.8
+        #torch.save(input_fx16,'/home/user/HJH/transformers/src/MPWnormfile/input_8_8.pt') ##저장
+
+        acc_sum = torch.sum(input_fx16, dim=-1, keepdim=True)
+        #acc_sum = 26bit(18.8)
+        acc_sum = torch.floor(acc_sum * scale_factor_8)/scale_factor_8 ##소수부8
+        acc_sum = torch.clip(acc_sum, -2**17, 2**17- 1/scale_factor_8)#정수부18 .소수부8
+        #torch.save(acc_sum,'/home/user/HJH/transformers/src/MPWnormfile/acc_sum_18_8.pt') ##저장
+
+        #mean계산
+        mean = acc_sum /2**8 #Q(18.8) -> Q(10.8)
+        mean = torch.floor(mean * scale_factor_8)/scale_factor_8 #소수부8로 precision 맞춤
+        mean = mean *0.33203125 #Q(10.8)*0.8 = 10.16
+
+        #mean = 16bit(8.8)로 만들기 = saturation
+        mean = torch.clip(mean, -2**7, 2**7 - 1/scale_factor_8) #정수부8.8
+        mean = torch.floor(mean * scale_factor_8)/scale_factor_8 #소수부8
+        #torch.save(mean,'/home/user/HJH/transformers/src/MPWnormfile/mean_8_8.pt') ##저장
+
+        #분산계산
+        #X^2 = 32bit(16.16) (8.8의 제곱)
+        x2 = input_fx16*input_fx16
+        #X^2 = 24bit(16.8)
+        
+        x2 = torch.floor(x2 * scale_factor_8)/scale_factor_8 #소수부8 #rescaling and round
+        #[try]#x2 = torch.clip(x2, -2**15, 2**15- 1/scale_factor_8)# 정수부16.8
+
+        #acc_sum_x2= 34bit(26.8 )
+        acc_sum_x2 = torch.sum(x2, dim=-1, keepdim=True)
+        acc_sum_x2 = torch.floor(acc_sum_x2 * scale_factor_8)/scale_factor_8 #소수부8
+        #[try]#acc_sum_x2 = torch.clip(acc_sum_x2, -2**25, 2**25- 1/scale_factor_8)# 정수부26.8
+        #torch.save(acc_sum_x2,'/home/user/HJH/transformers/src/MPWnormfile/acc_sum_x2_26_8.pt') ##저장
+        
+        
+        #mean_x2
+        mean_x2 = acc_sum_x2 /2**8 #/dmodel (26.8)>>8 = 18.8
+        mean_x2 = torch.floor(mean_x2 * scale_factor_8)/scale_factor_8 #소수부8
+        mean_x2 = mean_x2 *0.33203125 #18.8*0.8 = 18.16
+
+        ###mean_x2 = 26bit(16.10)                                 
+        ###mean_x2 = torch.floor(mean_x2 * scale_factor_10)/scale_factor_10 #소수부10
+
+        #mean_x2 = 32bit(16.16)   
+        mean_x2 = torch.floor(mean_x2 * scale_factor_16)/scale_factor_16 #소수부16
+        mean_x2 = torch.clip(mean_x2, -2**15, 2**15 - 1/scale_factor_16) #정수부16.16    
+        #torch.save(mean_x2,'/home/user/HJH/transformers/src/MPWnormfile/mean_x2_16_16.pt') ##저장 
+
+        #E(x)^2 = 32bit(16.16)
+        temp = mean*mean
+        temp = torch.floor(temp * scale_factor_16)/scale_factor_16 #소수부16
+        temp = torch.clip(temp, -2**15, 2**15 - 1/scale_factor_16) #정수부16.16
+        
+        ###E(x)^2 = 32bit(16.16)  -> 26bit(16.10)로 만들기 
+        ###temp = torch.floor(temp * scale_factor_10)/scale_factor_10 #소수부10
+        ###var = 26bit(16.10) - 26bit(16.10)
+
+
+        #var = 32bit - 32bit = 32bit(16.16)  -> (8.16)로 saturation
+        var = mean_x2 - temp
+        var = torch.floor(var * scale_factor_16)/scale_factor_16 #소수부16
+        var = torch.clip(var, -2**7, 2**7 - 1/scale_factor_16) #정수부 (8.16)
+        #torch.save(var,'/home/user/HJH/transformers/src/MPWnormfile/var_8_16.pt') ##저장 
+
+        eps = 0.0000152587890625
+
+        v = var + eps
+        # invsqrt = 1/ torch.sqrt(var + eps)
+        invsqrt = self.invsqrt(v) #custom_invsqrt.py
+
+        #inverse square root = 8.8
+        invsqrt = torch.floor(invsqrt * scale_factor_8)/scale_factor_8
+        invsqrt = torch.clip(invsqrt, -2**7, 2**7 - 1/scale_factor_8)
+        
+        # 8.8  * 8.8 = 16.16
+        normalized = (input_fx16 - mean) * invsqrt 
+        #normalized = 8.8
+        normalized = torch.floor(normalized * scale_factor_8)/scale_factor_8 #소수부8
+        normalized = torch.clip(normalized, -2**7, 2**7 - 1/scale_factor_8) #정수부8
+
+        if self.weight is not None:
+            #self.weight = 8.8
+            weight = torch.floor(self.weight * scale_factor_8)/scale_factor_8 #소수부8
+            weight = torch.clip(weight, -2**7, 2**7 - 1/scale_factor_8) #정수부8
+            out = normalized * weight
+        
+        else : out = normalized
+        #8.8
+        out = torch.floor(out * scale_factor_8)/scale_factor_8 #소수부8
+        out = torch.clip(out, -2**7, 2**7 - 1/scale_factor_8) #정수부8
+
+        if self.bias is not None:
+            #self.bias = 8.8
+            bias = torch.floor(self.bias * scale_factor_8)/scale_factor_8 #소수부8
+            bias = torch.clip(bias, -2**7, 2**7 - 1/scale_factor_8) #정수부8
+            out = out + bias
+
+        #8.8
+        out = torch.floor(out * scale_factor_8)/scale_factor_8 #소수부8
+        out = torch.clip(out, -2**7, 2**7 - 1/scale_factor_8) #정수부8
+
+        sw_out = out
+
+
+        client = HWLayerNormClient.get()
+        B = input.shape[0]
+
+        # 배치 전체 float32 → int16 스케일 변환 + int16 변환
+        input_scale = torch.clip(input * 256, -32768, 32767)
+        input_int16 = input_scale.to(torch.int16)
+
+        ################# TCP -> FPGA(PS)##############################################
+
+        for b in range(B):
+            x_np   = input_int16[b].detach().cpu().numpy()
+            hw_out = client.run(x_np)                          # int16, normalization만 (weight/bias 미적용)
+            hw_fp  = hw_out.astype(np.float32) / 256.0        # float32 복원 (normalized 수준)
+
+            # 비교: HW normalized vs SW normalized
+            sw_np   = normalized[b].detach().cpu().float().numpy()
+            max_err = float(np.abs(hw_fp - sw_np).max())
+
+            if max_err > self._worst_case_error:
+                self._worst_case_error = max_err
+                self._worst_case_input = x_np.copy()
+                print(f"[HW Mode2] worst-case 갱신: max_err={max_err:.5f}")
+
+        return sw_out
 
     def forward_original(self, input: Tensor) -> Tensor:
         return F.layer_norm(input, self.normalized_shape, self.weight, self.bias, self.eps)
@@ -600,6 +787,7 @@ class Custom_LayerNorm(Module):
 
         #torch.save(out,'/home/user/HJH/transformers/src/MPWnormfile/biasedout_8_8.pt') ##저장 
         #(8.8)
+
         return out
 
     def forward_dual_path(self, input: Tensor) -> Tensor:
