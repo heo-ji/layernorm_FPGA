@@ -36,7 +36,6 @@ layernorm_FPGA\transformer\
     ├── run_glue.py
     ├── run_glue_FXP_sst2.sh
 ```
-
 ```
 conda create -n bert_hw python=3.10
 conda activate bert_hw
@@ -46,6 +45,7 @@ pip install -e . //global python에서 하지 않도록 주의!
 cd src
 bash run_glue_FXP_sst2.sh
 ```
+
 2. Bitstream, PS 제어코드 준비
 
 ```
@@ -63,6 +63,62 @@ layernorm_FPGA\
 ```
 zcu111보드의 pynq버전 2.1이상이면
 PYNQ에서는 .bit + .hwh 두 개 (파일명 base name이 같게!) 옮겨놓는다.
+
+---
+<details>
+<summary>(참고, GLUE task 모델 정확도)</summary>
+<pre><code>
+pip install evaluate
+pip uninstall -y peft
+mkdir -p ../../result/result_bert_base_original
+</code></pre>
+*   SW original 정확도 BERT-BASE/GLUE task
+<pre><code>
+[MNLI] eval_accuracy: 0.8463
+[QNLI] eval_accuracy: 0.9129
+[QQP]  eval_accuracy: 0.9088
+[RTE]  eval_loss: 0.7149
+[SST-2] eval_accuracy: 0.9323
+[STS-B] eval_combined_score: 0.8944
+[CoLA] eval_matthews_correlation: 0.6024
+[MRPC] eval_accuracy: 0.8627
+</code></pre>
+    
+*   SW + layernorm 만 HW 정확도 BERT-BASE/GLUE task
+<pre><code>
+[MNLI] eval_accuracy: 0.8414
+[QNLI] eval_accuracy: 0.9072
+[QQP]  eval_accuracy: 0.9071
+[RTE]  eval_accuracy: 0.7220
+[SST-2] eval_accuracy: 0.9323
+[STS-B] eval_combined_score: 0.8916
+[CoLA] eval_matthews_correlation: 0.6179
+[MRPC] eval_accuracy: 0.8529
+</code></pre>
+
+*   full HW(FXP8.8) 정확도 BERT-BASE/GLUE task
+<pre><code>
+[MNLI] eval_accuracy: 0.83739
+[QNLI] eval_accuracy: 0.9081
+[QQP]  eval_accuracy: 0.9074
+[RTE]  eval_accuracy: 0.7220
+[SST-2] eval_accuracy: 0.9300
+[STS-B] eval_combined_score: 0.8916
+[CoLA] eval_matthews_correlation: 0.615343(더 좋아져)
+[MRPC] eval_accuracy: 0.8725(더 좋아져)
+</code></pre>
+
+* 더 좋아지는이유
+1. Outlier 값을 강제로 잘라내면서, 모델에 악영향을 줄 수 있는 극단적인 값 영향력이 차단
+2. FXP8.8 양자화로 소수점 아래 자릿수를 제한하면서 미세한 데이터 노이즈가 제거
+3. CoLA / MRPC 에서 사용되는 데이터셋의 크기가 다른 task에 비해매우 작음
+
+* GLUE task의 구성
+: 문장 1개를 주고 맞히는 문제, 문장2개의 유사도 및 동의어 판별, 문장 관계 추론-문장 하나를보고 나머지한개의 참/거짓판단 , 긍정부정감정 분석..이런거함
+
+</details>
+
+---
 
 
 # 실행 방법
