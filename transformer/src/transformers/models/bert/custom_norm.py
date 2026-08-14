@@ -82,6 +82,7 @@ class HWLayerNormClient:
 # ──────────────────────────────────────────────────────────────────
 
 
+import os
 import torch
 import numbers
 from torch.nn.parameter import Parameter
@@ -424,7 +425,8 @@ class Custom_LayerNorm(Module):
     elementwise_affine: bool
 
     def __init__(self, normalized_shape: _shape_t, eps: float = 1e-5, method: str = 'original', elementwise_affine: bool = True,
-                 bias: bool = True, device=None, dtype=None) -> None:
+                 bias: bool = True, device=None, dtype=None,
+                 layer_idx: int = None, block_type: str = None, task_name: str = None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
         if isinstance(normalized_shape, numbers.Integral):
@@ -456,6 +458,20 @@ class Custom_LayerNorm(Module):
         # HW mode2 : worst-case 입력 텐서 저장용
         self._worst_case_error = -1.0
         self._worst_case_input = None
+
+        # forward_fxp88 중간 텐서 저장용 (layer#/atten,ffn 구분 → 덮어쓰기 방지)
+        self.layer_idx = layer_idx
+        self.block_type = block_type
+        self.task_name = task_name or 'unknown_task'
+
+    def _save_fxp_tensor(self, tensor: Tensor, name: str) -> None:
+        """GLUEtask_tensor/{task_name}/layer{layer_idx}_{block_type}_{name}.pt 로 저장 (레이어/블록별로 별도 파일)."""
+        save_dir = os.path.join('GLUEtask_tensor', self.task_name)
+        os.makedirs(save_dir, exist_ok=True)
+        layer_tag = f"layer{self.layer_idx}" if self.layer_idx is not None else "layerX"
+        block_tag = self.block_type or "unknown"
+        save_path = os.path.join(save_dir, f"{layer_tag}_{block_tag}_{name}.pt")
+        torch.save(tensor.detach().cpu(), save_path)
 
     def reset_parameters(self) -> None:
         if self.elementwise_affine:
@@ -676,7 +692,7 @@ class Custom_LayerNorm(Module):
         #input = 8.8
         input_fx16 = torch.floor(input * scale_factor_8)/scale_factor_8 #소수부8
         input_fx16 = torch.clip(input_fx16, -2**7, 2**7 - 1/scale_factor_8) #정수부8.8
-        #torch.save(input_fx16,'/home/user/HJH/transformers/src/MPWnormfile/input_8_8.pt') ##저장
+        self._save_fxp_tensor(input_fx16, 'input')
 
         acc_sum = torch.sum(input_fx16, dim=-1, keepdim=True)
         #acc_sum = 26bit(18.8)
@@ -692,13 +708,13 @@ class Custom_LayerNorm(Module):
         #mean = 16bit(8.8)로 만들기 = saturation
         mean = torch.clip(mean, -2**7, 2**7 - 1/scale_factor_8) #정수부8.8
         mean = torch.floor(mean * scale_factor_8)/scale_factor_8 #소수부8
-        #torch.save(mean,'/home/user/HJH/transformers/src/MPWnormfile/mean_8_8.pt') ##저장
+        self._save_fxp_tensor(mean, 'mean')
 
         #분산계산
         #X^2 = 32bit(16.16) (8.8의 제곱)
         x2 = input_fx16*input_fx16
         #X^2 = 24bit(16.8)
-        
+
         x2 = torch.floor(x2 * scale_factor_8)/scale_factor_8 #소수부8 #rescaling and round
         #[try]#x2 = torch.clip(x2, -2**15, 2**15- 1/scale_factor_8)# 정수부16.8
 
@@ -707,27 +723,27 @@ class Custom_LayerNorm(Module):
         acc_sum_x2 = torch.floor(acc_sum_x2 * scale_factor_8)/scale_factor_8 #소수부8
         #[try]#acc_sum_x2 = torch.clip(acc_sum_x2, -2**25, 2**25- 1/scale_factor_8)# 정수부26.8
         #torch.save(acc_sum_x2,'/home/user/HJH/transformers/src/MPWnormfile/acc_sum_x2_26_8.pt') ##저장
-        
-        
+
+
         #mean_x2
         mean_x2 = acc_sum_x2 /2**8 #/dmodel (26.8)>>8 = 18.8
         mean_x2 = torch.floor(mean_x2 * scale_factor_8)/scale_factor_8 #소수부8
         mean_x2 = mean_x2 *0.33203125 #18.8*0.8 = 18.16
 
-        ###mean_x2 = 26bit(16.10)                                 
+        ###mean_x2 = 26bit(16.10)
         ###mean_x2 = torch.floor(mean_x2 * scale_factor_10)/scale_factor_10 #소수부10
 
-        #mean_x2 = 32bit(16.16)   
+        #mean_x2 = 32bit(16.16)
         mean_x2 = torch.floor(mean_x2 * scale_factor_16)/scale_factor_16 #소수부16
-        mean_x2 = torch.clip(mean_x2, -2**15, 2**15 - 1/scale_factor_16) #정수부16.16    
-        #torch.save(mean_x2,'/home/user/HJH/transformers/src/MPWnormfile/mean_x2_16_16.pt') ##저장 
+        mean_x2 = torch.clip(mean_x2, -2**15, 2**15 - 1/scale_factor_16) #정수부16.16
+        #torch.save(mean_x2,'/home/user/HJH/transformers/src/MPWnormfile/mean_x2_16_16.pt') ##저장
 
         #E(x)^2 = 32bit(16.16)
         temp = mean*mean
         temp = torch.floor(temp * scale_factor_16)/scale_factor_16 #소수부16
         temp = torch.clip(temp, -2**15, 2**15 - 1/scale_factor_16) #정수부16.16
-        
-        ###E(x)^2 = 32bit(16.16)  -> 26bit(16.10)로 만들기 
+
+        ###E(x)^2 = 32bit(16.16)  -> 26bit(16.10)로 만들기
         ###temp = torch.floor(temp * scale_factor_10)/scale_factor_10 #소수부10
         ###var = 26bit(16.10) - 26bit(16.10)
 
@@ -736,7 +752,7 @@ class Custom_LayerNorm(Module):
         var = mean_x2 - temp
         var = torch.floor(var * scale_factor_16)/scale_factor_16 #소수부16
         var = torch.clip(var, -2**7, 2**7 - 1/scale_factor_16) #정수부 (8.16)
-        #torch.save(var,'/home/user/HJH/transformers/src/MPWnormfile/var_8_16.pt') ##저장 
+        #torch.save(var,'/home/user/HJH/transformers/src/MPWnormfile/var_8_16.pt') ##저장
 
         eps = self.eps #(.16)
         eps = round(eps * scale_factor_16)/scale_factor_16 #소수부16 = eps=0.0이됨
@@ -749,14 +765,14 @@ class Custom_LayerNorm(Module):
         #inverse square root = 8.8
         invsqrt = torch.floor(invsqrt * scale_factor_8)/scale_factor_8
         invsqrt = torch.clip(invsqrt, -2**7, 2**7 - 1/scale_factor_8)
-        #torch.save(invsqrt,'/home/user/HJH/transformers/src/MPWnormfile/invsqrt_8_8.pt') ##저장 
+        self._save_fxp_tensor(invsqrt, 'invsqrt')
 
         # 8.8  * 8.8 = 16.16
-        normalized = (input_fx16 - mean) * invsqrt 
+        normalized = (input_fx16 - mean) * invsqrt
         #normalized = 8.8
         normalized = torch.floor(normalized * scale_factor_8)/scale_factor_8 #소수부8
         normalized = torch.clip(normalized, -2**7, 2**7 - 1/scale_factor_8) #정수부8
-        #torch.save(normalized,'/home/user/HJH/transformers/src/MPWnormfile/normalized_8_8.pt') ##저장    
+        self._save_fxp_tensor(normalized, 'normalized')
 
         if self.weight is not None:
             #self.weight = 8.8

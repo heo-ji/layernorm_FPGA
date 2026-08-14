@@ -15,13 +15,12 @@ task_names=("mnli" "qnli" "qqp" "rte" "sst2" "stsb" "cola" "mrpc")
 # Ensure both arrays have the same length
 length=${#model_paths[@]}
 
-DIR="/home/user/HJH_v2/layernorm_SW/result_bert_base" # bert_base
+DIR="./result_bert_base" # bert_base
 
 # Loop through each model path and task name
-#for (( i=0; i<${length}; i++ ))
 export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
-for (( i=2; i<3; i++ ))
+for (( i=0; i<${length}; i++ ))
 do
     CUDA_VISIBLE_DEVICES=0
     python3 run_glue.py \

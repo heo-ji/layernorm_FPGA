@@ -430,6 +430,7 @@ def main():
     config.softmax_method = model_args.softmax_method         ###추가함
     config.layernorm_method = model_args.layernorm_method     ###추가함
     config.hidden_act = model_args.hidden_act                 ###추가함
+    config.task_name = data_args.task_name                    ###추가함 (텐서 저장 경로용)
 
     ###추가함 (HIL HW 연결 초기화)
     if model_args.layernorm_method in ('hw_mode1', 'hw_mode2'):

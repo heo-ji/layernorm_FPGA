@@ -410,10 +410,11 @@ class BertSelfAttention(nn.Module):
 
 
 class BertSelfOutput(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None, block_type='atten'):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.LayerNorm = Custom_LayerNorm(config.hidden_size, eps=config.layer_norm_eps, method=config.layernorm_method )
+        self.LayerNorm = Custom_LayerNorm(config.hidden_size, eps=config.layer_norm_eps, method=config.layernorm_method,
+                                           layer_idx=layer_idx, block_type=block_type, task_name=getattr(config, 'task_name', None))
         ####self.LayerNorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         ####self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -430,10 +431,10 @@ class BertSelfOutput(nn.Module):
 
 
 class BertAttention(nn.Module):
-    def __init__(self, config, position_embedding_type=None):
+    def __init__(self, config, position_embedding_type=None, layer_idx=None, block_type='atten'):
         super().__init__()
         self.self = BertSelfAttention(config, position_embedding_type=position_embedding_type)
-        self.output = BertSelfOutput(config)
+        self.output = BertSelfOutput(config, layer_idx=layer_idx, block_type=block_type)
         self.pruned_heads = set()
 
     def prune_heads(self, heads):
@@ -516,11 +517,12 @@ class BertIntermediate(nn.Module):##feed forward block
         return hidden_states
 
 
-class BertOutput(nn.Module):## add+layernorm after FFN 
-    def __init__(self, config):
+class BertOutput(nn.Module):## add+layernorm after FFN
+    def __init__(self, config, layer_idx=None):
         super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
-        self.LayerNorm = Custom_LayerNorm(config.hidden_size, eps=config.layer_norm_eps, method=config.layernorm_method )
+        self.LayerNorm = Custom_LayerNorm(config.hidden_size, eps=config.layer_norm_eps, method=config.layernorm_method,
+                                           layer_idx=layer_idx, block_type='ffn', task_name=getattr(config, 'task_name', None))
         ####self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
@@ -559,19 +561,19 @@ class BertOutput(nn.Module):## add+layernorm after FFN
 
 
 class BertLayer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
-        self.attention = BertAttention(config)
+        self.attention = BertAttention(config, layer_idx=layer_idx, block_type='atten')
         self.is_decoder = config.is_decoder
         self.add_cross_attention = config.add_cross_attention
         if self.add_cross_attention:
             if not self.is_decoder:
                 raise ValueError(f"{self} should be used as a decoder model if cross attention is added")
-            self.crossattention = BertAttention(config, position_embedding_type="absolute")
+            self.crossattention = BertAttention(config, position_embedding_type="absolute", layer_idx=layer_idx, block_type='crossatten')
         self.intermediate = BertIntermediate(config)
-        self.output = BertOutput(config)
+        self.output = BertOutput(config, layer_idx=layer_idx)
 
     def forward(
         self,
@@ -648,7 +650,7 @@ class BertEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layer = nn.ModuleList([BertLayer(config, layer_idx=i) for i in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
     def forward(
