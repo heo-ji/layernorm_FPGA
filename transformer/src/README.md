@@ -4,6 +4,9 @@
 ## 실제 사용 중인 옵션 (./run_glue_models.sh 기준)
 
 ```bash
+DIR="../../result_bert_base"          # layernorm_FPGA 바로 아래에 생성
+TENSOR_DIR="../../GLUEtask_tensor"    # layernorm_FPGA 바로 아래에 생성
+
 python3 run_glue.py \
     --model_name_or_path ${model_paths[$i]} \
     --task_name ${task_names[$i]} \
@@ -13,7 +16,8 @@ python3 run_glue.py \
     --overwrite_output_dir \
     --softmax_method "base2"  \
     --hidden_act "CustomGELU" \
-    --layernorm_method custom_invsqrt_norm
+    --layernorm_method custom_invsqrt_norm \
+    --tensor_save_dir $TENSOR_DIR/${task_names[$i]}/
 ```
 
 | 옵션 | 기본값 | 소속 | 설명 |
@@ -27,6 +31,7 @@ python3 run_glue.py \
 | `--softmax_method` | `"original"` | ModelArguments | softmax 방식: `cordic`(사용 x) / `base2` / `original` |
 | `--hidden_act` | `"gelu"` | ModelArguments | GELU 방식: `gelu` 또는 `CustomGELU` |
 | `--layernorm_method` | `"original"` | ModelArguments | LayerNorm 방식: `original` / `custom_invsqrt_norm` / `dualpath_norm` / `hw_mode1` / `hw_mode2` |
+| `--tensor_save_dir` | `"GLUEtask_tensor"` | ModelArguments | forward_fxp88 중간 텐서 저장 경로 (아래 섹션 참고) |
 
 ---
 
@@ -50,25 +55,25 @@ GLUE 평가셋 전체(수백~수천 개)를 미니배치 8개씩(텐서안의 B)
 ## 저장 경로
 
 ```
-GLUEtask_tensor/{task_name}/layer{N}_{block_type}_{tensor_name}.pt
+{tensor_save_dir}/layer{N}_{block_type}_{tensor_name}.pt
 ```
 
-- `{task_name}`: `run_glue.py`에 넘긴 `--task_name` 값 (예: `mrpc`). 지정하지 않으면 `unknown_task`.
+- `{tensor_save_dir}`: `run_glue.py`에 넘긴 `--tensor_save_dir` 값. 지정하지 않으면 실행 위치 기준 상대경로 `GLUEtask_tensor`.
 - `{N}`: BERT layer 번호 (0-base, `config.num_hidden_layers-1`까지).
 - `{block_type}`: `atten`(self-attention 뒤 LayerNorm, `BertSelfOutput`) / `ffn`(FFN 뒤 LayerNorm, `BertOutput`) / `crossatten`(decoder cross-attention, 이 repo에선 사용 안 함).
 - `{tensor_name}`: `input` / `mean` / `invsqrt` / `normalized`.
 
-`GLUEtask_tensor`는 **상대경로**라서, `python3 run_glue.py`를 실행한 현재 작업 디렉터리(cwd) 기준으로
-생성된다. `run_glue_models.sh`처럼 `src/` 안에서 실행하면 최종 경로는:
+`run_glue_models.sh`는 `--tensor_save_dir $TENSOR_DIR/${task_names[$i]}/`로 task별 하위 폴더까지 직접 지정해서 넘긴다.
+`TENSOR_DIR="../../GLUEtask_tensor"`이므로 `src/`에서 스크립트를 실행하면 최종 경로는 `layernorm_FPGA` 바로 아래에 생긴다:
 
 ```
-src/GLUEtask_tensor/mrpc/layer0_atten_input.pt
-src/GLUEtask_tensor/mrpc/layer0_atten_mean.pt
-src/GLUEtask_tensor/mrpc/layer0_atten_invsqrt.pt
-src/GLUEtask_tensor/mrpc/layer0_atten_normalized.pt
-src/GLUEtask_tensor/mrpc/layer0_ffn_input.pt
+GLUEtask_tensor/mrpc/layer0_atten_input.pt
+GLUEtask_tensor/mrpc/layer0_atten_mean.pt
+GLUEtask_tensor/mrpc/layer0_atten_invsqrt.pt
+GLUEtask_tensor/mrpc/layer0_atten_normalized.pt
+GLUEtask_tensor/mrpc/layer0_ffn_input.pt
 ...
-src/GLUEtask_tensor/mrpc/layer11_ffn_normalized.pt
+GLUEtask_tensor/mrpc/layer11_ffn_normalized.pt
 ```
 
 

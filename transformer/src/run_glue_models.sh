@@ -15,7 +15,8 @@ task_names=("mnli" "qnli" "qqp" "rte" "sst2" "stsb" "cola" "mrpc")
 # Ensure both arrays have the same length
 length=${#model_paths[@]}
 
-DIR="./result_bert_base" # bert_base
+DIR="../../result_bert_base" # bert_base (layernorm_FPGA 바로 아래)
+TENSOR_DIR="../../GLUEtask_tensor" # forward_fxp88 중간 텐서 저장 경로 (layernorm_FPGA 바로 아래)
 
 # Loop through each model path and task name
 export NCCL_P2P_DISABLE=1
@@ -32,7 +33,8 @@ do
     --overwrite_output_dir \
     --softmax_method "base2"  \
     --hidden_act "CustomGELU" \
-   --layernorm_method custom_invsqrt_norm
+    --layernorm_method custom_invsqrt_norm \
+    --tensor_save_dir $TENSOR_DIR/${task_names[$i]}/
 done
 
 

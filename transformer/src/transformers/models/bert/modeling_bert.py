@@ -414,7 +414,8 @@ class BertSelfOutput(nn.Module):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.LayerNorm = Custom_LayerNorm(config.hidden_size, eps=config.layer_norm_eps, method=config.layernorm_method,
-                                           layer_idx=layer_idx, block_type=block_type, task_name=getattr(config, 'task_name', None))
+                                           layer_idx=layer_idx, block_type=block_type, task_name=getattr(config, 'task_name', None),
+                                           tensor_save_dir=getattr(config, 'tensor_save_dir', 'GLUEtask_tensor'))
         ####self.LayerNorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         ####self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -522,7 +523,8 @@ class BertOutput(nn.Module):## add+layernorm after FFN
         super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.LayerNorm = Custom_LayerNorm(config.hidden_size, eps=config.layer_norm_eps, method=config.layernorm_method,
-                                           layer_idx=layer_idx, block_type='ffn', task_name=getattr(config, 'task_name', None))
+                                           layer_idx=layer_idx, block_type='ffn', task_name=getattr(config, 'task_name', None),
+                                           tensor_save_dir=getattr(config, 'tensor_save_dir', 'GLUEtask_tensor'))
         ####self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 

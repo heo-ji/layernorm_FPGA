@@ -426,7 +426,8 @@ class Custom_LayerNorm(Module):
 
     def __init__(self, normalized_shape: _shape_t, eps: float = 1e-5, method: str = 'original', elementwise_affine: bool = True,
                  bias: bool = True, device=None, dtype=None,
-                 layer_idx: int = None, block_type: str = None, task_name: str = None) -> None:
+                 layer_idx: int = None, block_type: str = None, task_name: str = None,
+                 tensor_save_dir: str = 'GLUEtask_tensor') -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
         if isinstance(normalized_shape, numbers.Integral):
@@ -463,10 +464,11 @@ class Custom_LayerNorm(Module):
         self.layer_idx = layer_idx
         self.block_type = block_type
         self.task_name = task_name or 'unknown_task'
+        self.tensor_save_dir = tensor_save_dir
 
     def _save_fxp_tensor(self, tensor: Tensor, name: str) -> None:
-        """GLUEtask_tensor/{task_name}/layer{layer_idx}_{block_type}_{name}.pt 로 저장 (레이어/블록별로 별도 파일)."""
-        save_dir = os.path.join('GLUEtask_tensor', self.task_name)
+        """{tensor_save_dir}/layer{layer_idx}_{block_type}_{name}.pt 로 저장 (레이어/블록별로 별도 파일)."""
+        save_dir = self.tensor_save_dir
         os.makedirs(save_dir, exist_ok=True)
         layer_tag = f"layer{self.layer_idx}" if self.layer_idx is not None else "layerX"
         block_tag = self.block_type or "unknown"

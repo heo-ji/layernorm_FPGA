@@ -255,6 +255,10 @@ class ModelArguments:
     hw_port: Optional[int] = field(
         default=5000, metadata={"help": "ZCU111 PS TCP 포트 (hw_mode1/2 사용 시)"}
     )
+    ###추가함
+    tensor_save_dir: Optional[str] = field(
+        default="GLUEtask_tensor", metadata={"help": "forward_fxp88 중간 텐서 저장 경로"}
+    )
 
 
 def main():
@@ -431,6 +435,7 @@ def main():
     config.layernorm_method = model_args.layernorm_method     ###추가함
     config.hidden_act = model_args.hidden_act                 ###추가함
     config.task_name = data_args.task_name                    ###추가함 (텐서 저장 경로용)
+    config.tensor_save_dir = model_args.tensor_save_dir       ###추가함
 
     ###추가함 (HIL HW 연결 초기화)
     if model_args.layernorm_method in ('hw_mode1', 'hw_mode2'):
