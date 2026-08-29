@@ -246,7 +246,7 @@ class ModelArguments:
     )
     ###추가함
     layernorm_method: Optional[str] = field(
-        default="original", metadata={"help": " layernorm method to use: 'original' or 'custom_invsqrt_norm' or 'dualpath_norm' or 'hw_mode1' or 'hw_mode2' "}
+        default="original", metadata={"help": " layernorm method to use: 'original' or 'custom_invsqrt_norm' or 'dualpath_norm' or 'hw_mode1' or 'hw_mode2' or 'profiling_pass1' or 'profiling_pass2' "}
     )
     ###추가함 (HIL HW 연결 설정)
     hw_ip: Optional[str] = field(
@@ -258,6 +258,10 @@ class ModelArguments:
     ###추가함
     tensor_save_dir: Optional[str] = field(
         default="GLUEtask_tensor", metadata={"help": "forward_fxp88 중간 텐서 저장 경로"}
+    )
+    ###추가함 (SAIF profiling, layernorm_method='profiling_pass1' 사용 시)
+    saif_report_dir: Optional[str] = field(
+        default="saif_convergence_report", metadata={"help": "pass1 수렴(K) report(json, task별 파일) 저장 경로 (run_glue.py 기준 상대경로)"}
     )
 
 
@@ -627,37 +631,62 @@ def main():
         logger.info("*** Evaluate ***")
         start_time = time.time()
 
-        # Loop to handle MNLI double evaluation (matched, mis-matched)
-        tasks = [data_args.task_name]
-        eval_datasets = [eval_dataset]
-        if data_args.task_name == "mnli":
-            tasks.append("mnli-mm")
-            valid_mm_dataset = raw_datasets["validation_mismatched"]
-            if data_args.max_eval_samples is not None:
-                max_eval_samples = min(len(valid_mm_dataset), data_args.max_eval_samples)
-                valid_mm_dataset = valid_mm_dataset.select(range(max_eval_samples))
-            eval_datasets.append(valid_mm_dataset)
-            combined = {}
+        ###추가함 (SAIF profiling pass1: 위치별 activity 수집 → 수렴 forward 수(K) report 생성)
+        # task_name을 그대로 report 파일명에 쓰므로 run_glue_models.sh처럼 여러 task를 루프 돌리면
+        # task별로 saif_report_dir/{task_name}_convergence.json 이 각각 생성됨.
+        if model_args.layernorm_method == 'profiling_pass1':
+            from transformers.models.bert.custom_norm import Custom_LayerNorm
 
-        for eval_dataset, task in zip(eval_datasets, tasks):
-            metrics = trainer.evaluate(eval_dataset=eval_dataset)
+            logger.info("[SAIF pass1] activity 수집 중...")
+            Custom_LayerNorm.saif_reset()
+            trainer.evaluate(eval_dataset=eval_dataset)
 
-            max_eval_samples = (
-                data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
+            report, save_path = Custom_LayerNorm.saif_write_pass1_report(
+                task_name=data_args.task_name, report_dir=model_args.saif_report_dir
             )
-            metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
+            logger.info(f"[SAIF pass1] report 저장: {save_path}")
+            for tag, info in report.items():
+                logger.info(
+                    f"  {tag}: N={info['num_forwards']} "
+                    f"convergence_forward_count(K)={info['convergence_forward_count']} "
+                    f"medoid_forward_idx={info['medoid_forward_idx']}"
+                )
 
-            if task == "mnli-mm":
-                metrics = {k + "_mm": v for k, v in metrics.items()}
-            if task is not None and "mnli" in task:
-                combined.update(metrics)
+            end_time = time.time()
+            logger.info(f"Evaluation latency: {end_time - start_time:.5f} seconds")
 
-            trainer.log_metrics("eval", metrics)
-            trainer.save_metrics("eval", combined if task is not None and "mnli" in task else metrics)
-        
-        end_time = time.time()
-        latency = end_time - start_time
-        logger.info(f"Evaluation latency: {latency:.5f} seconds")
+        else:
+            # Loop to handle MNLI double evaluation (matched, mis-matched)
+            tasks = [data_args.task_name]
+            eval_datasets = [eval_dataset]
+            if data_args.task_name == "mnli":
+                tasks.append("mnli-mm")
+                valid_mm_dataset = raw_datasets["validation_mismatched"]
+                if data_args.max_eval_samples is not None:
+                    max_eval_samples = min(len(valid_mm_dataset), data_args.max_eval_samples)
+                    valid_mm_dataset = valid_mm_dataset.select(range(max_eval_samples))
+                eval_datasets.append(valid_mm_dataset)
+                combined = {}
+
+            for eval_dataset, task in zip(eval_datasets, tasks):
+                metrics = trainer.evaluate(eval_dataset=eval_dataset)
+
+                max_eval_samples = (
+                    data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
+                )
+                metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
+
+                if task == "mnli-mm":
+                    metrics = {k + "_mm": v for k, v in metrics.items()}
+                if task is not None and "mnli" in task:
+                    combined.update(metrics)
+
+                trainer.log_metrics("eval", metrics)
+                trainer.save_metrics("eval", combined if task is not None and "mnli" in task else metrics)
+
+            end_time = time.time()
+            latency = end_time - start_time
+            logger.info(f"Evaluation latency: {latency:.5f} seconds")
 
 
     if training_args.do_predict:

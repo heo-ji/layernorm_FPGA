@@ -1,6 +1,12 @@
 """
 torch.nn.modules.normalization에서 복붙
 class Custom_LayerNorm
+
+──────────────────────────────────────────────────────────────────
+SAIF profiling 전용 사본 (custom_norm.py는 그대로 두고 이 파일만 수정)
+사용법: 프로파일링할 때 이 파일 내용을 custom_norm.py에 수동으로 덮어쓰기
+추가된 것: Custom_LayerNorm.forward_saif_profile() + saif_* classmethod들
+──────────────────────────────────────────────────────────────────
 """
 
 from .custom_invsqrt import custom_invsqrt #추가함
@@ -425,9 +431,15 @@ class Custom_LayerNorm(Module):
     eps: float
     elementwise_affine: bool
 
-    # ── SAIF profiling pass1용 클래스 변수 (모든 Custom_LayerNorm 인스턴스가 공유) ──
-    _saif_forward_idx = -1   # 전체 forward(batch) 카운터. layer0/atten 호출 시 +1
-    _saif_log = {}           # {(layer_idx, block_type): {forward_idx: activity(32,)}}
+    # ── SAIF profiling 전용 클래스 변수 (모든 Custom_LayerNorm 인스턴스가 공유) ──
+    # run_glue.py에서 Custom_LayerNorm.saif_stage = 'pass1' / 'pass2' 로 제어
+    saif_stage = None                  # None | 'pass1' | 'pass2'
+    saif_target_layers = None          # pass2에서 실제 tensor를 저장할 layer_idx 집합. None=전체 저장
+    _saif_forward_idx = -1             # 전체 forward(batch) 카운터. layer0/atten 호출 시 +1
+    _saif_sum = {}                     # {(layer_idx, block_type): activity 합}
+    _saif_count = {}                   # {(layer_idx, block_type): 누적 forward 개수}
+    _saif_log = {}                     # {(layer_idx, block_type): {forward_idx: activity}}
+    _saif_representative = {}          # pass2에서 사용할 {(layer_idx, block_type): 대표 forward_idx}
 
     def __init__(self, normalized_shape: _shape_t, eps: float = 1e-5, method: str = 'original', elementwise_affine: bool = True,
                  bias: bool = True, device=None, dtype=None,
@@ -480,65 +492,68 @@ class Custom_LayerNorm(Module):
         save_path = os.path.join(save_dir, f"{layer_tag}_{block_tag}_{name}.pt")
         torch.save(tensor.detach().cpu(), save_path)
 
-    # ── SAIF profiling pass1 제어용 classmethod ─────────────────────
+    # ── SAIF profiling 제어용 classmethod ───────────────────────────
     @classmethod
-    def saif_reset(cls):
-        """pass1 시작 전 호출. forward 카운터와 activity 로그 초기화."""
+    def saif_reset_counter(cls):
+        """pass1/pass2 시작 전 각각 호출. 두 pass의 forward_idx가 동일 순서로 매칭되게 함
+        (eval dataloader가 shuffle 없이 동일 순서로 도는 것을 전제로 함)."""
         cls._saif_forward_idx = -1
+
+    @classmethod
+    def saif_reset_stats(cls):
+        """pass1 시작 전 호출. activity 누적치 초기화."""
+        cls._saif_sum = {}
+        cls._saif_count = {}
         cls._saif_log = {}
 
     @classmethod
-    def saif_write_pass1_report(cls, task_name: str, report_dir: str = 'saif_convergence_report', epsilon: float = 0.005):
-        """
-        pass1(전체 eval) 종료 후 호출.
-        위치별(layer_idx, block_type)로 forward를 몇 개까지 누적해야
-        running-mean activity가 전체 평균의 epsilon 이내로 수렴해서
-        이후 다시 벗어나지 않는지(convergence_forward_count = K)를 계산하고,
-        참고용으로 전체 평균에 가장 가까운 실제 forward(medoid)도 같이 기록해서
-        {report_dir}/{task_name}_convergence.json 으로 저장.
-        """
-        report = {}
-        for key, log in cls._saif_log.items():
-            layer_idx, block_type = key
-            forward_ids = sorted(log.keys())
-            vectors = torch.stack([log[i] for i in forward_ids])  # (N, 32)
-            n_total = vectors.shape[0]
-
-            counts = torch.arange(1, n_total + 1, dtype=vectors.dtype).unsqueeze(1)
-            running_mean = torch.cumsum(vectors, dim=0) / counts  # (N, 32)
-            final_mean = running_mean[-1]
-
-            dist_to_final = torch.sqrt(torch.mean((running_mean - final_mean) ** 2, dim=1))  # (N,)
-
-            # K = 이 시점부터는 계속 epsilon 이내에 머무는 가장 작은 forward 개수
-            last_bad = -1
-            for n in range(n_total):
-                if dist_to_final[n].item() > epsilon:
-                    last_bad = n
-            k = last_bad + 2 if last_bad >= 0 else 1
-
-            # medoid : 참고용, 전체 평균에 가장 가까운 실제 forward
-            dist_per_forward = torch.sqrt(torch.mean((vectors - final_mean) ** 2, dim=1))
-            best_pos = int(torch.argmin(dist_per_forward))
-
-            checkpoints = sorted({2**p for p in range(0, 20) if 2**p <= n_total} | {n_total})
-
-            report[f"layer{layer_idx}_{block_type}"] = {
-                "num_forwards": n_total,
-                "convergence_forward_count": k,
-                "epsilon": epsilon,
-                "medoid_forward_idx": forward_ids[best_pos],
-                "medoid_distance": float(dist_per_forward[best_pos]),
-                "dist_to_final_by_forward_count": {
-                    str(n): float(dist_to_final[n - 1]) for n in checkpoints
-                },
+    def saif_compute_representative(cls):
+        """pass1 종료 후 호출. 위치별 평균 activity와 RMS distance가 가장 작은
+        실제 forward_idx를 선정. distance가 크면(=퍼짐이 큼) 대표성이 약하다는 신호이므로 같이 기록."""
+        representative = {}
+        summary = {}
+        for key, total in cls._saif_sum.items():
+            count = cls._saif_count[key]
+            mean_vec = total / count
+            best_idx, best_dist = None, None
+            for fidx, vec in cls._saif_log[key].items():
+                dist = torch.sqrt(torch.mean((vec - mean_vec) ** 2)).item()
+                if best_dist is None or dist < best_dist:
+                    best_dist, best_idx = dist, fidx
+            representative[key] = best_idx
+            summary[key] = {
+                "forward_idx": best_idx,
+                "distance": best_dist,
+                "num_forwards": count,
+                "mean_activity": mean_vec.tolist(),
             }
+        cls._saif_representative = representative
+        return summary
 
-        os.makedirs(report_dir, exist_ok=True)
-        save_path = os.path.join(report_dir, f"{task_name}_convergence.json")
-        with open(save_path, 'w') as f:
-            json.dump(report, f, indent=2)
-        return report, save_path
+    @classmethod
+    def saif_save_stats(cls, json_path: str):
+        """saif_compute_representative() 결과를 json으로 저장."""
+        summary = cls.saif_compute_representative()
+        serializable = {f"layer{k[0]}_{k[1]}": v for k, v in summary.items()}
+        save_dir = os.path.dirname(json_path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+        with open(json_path, 'w') as f:
+            json.dump(serializable, f, indent=2)
+        return serializable
+
+    @classmethod
+    def saif_load_representative(cls, json_path: str):
+        """pass2 시작 전 호출. json에서 위치별 대표 forward_idx를 로드."""
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+        representative = {}
+        for tag, info in data.items():
+            body = tag[len('layer'):]
+            layer_str, block_type = body.rsplit('_', 1)
+            representative[(int(layer_str), block_type)] = info["forward_idx"]
+        cls._saif_representative = representative
+        return representative
 
     def reset_parameters(self) -> None:
         if self.elementwise_affine:
@@ -557,10 +572,8 @@ class Custom_LayerNorm(Module):
             return self.forward_hw_mode1(input)
         elif self.method == 'hw_mode2':
             return self.forward_hw_mode2(input)
-        elif self.method == 'profiling_pass1':
-            return self.forward_profiling_pass1(input)
-        elif self.method == 'profiling_pass2':
-            return self.forward_profiling_pass2(input)
+        elif self.method == 'saif_profiling':
+            return self.forward_saif_profile(input)
         else:
             raise ValueError(f"Unsupported method: {self.method}")
 
@@ -750,13 +763,14 @@ class Custom_LayerNorm(Module):
 
         return sw_out
 
-    # ── SAIF profiling pass1 : 위치별 activity 수집 (수렴 forward 수 K 확인용) ──
-    def forward_profiling_pass1(self, input: Tensor) -> Tensor:
+    # ── SAIF profiling : pass1(activity 수집) / pass2(대표 forward만 tensor 저장) ──
+    def forward_saif_profile(self, input: Tensor) -> Tensor:
         """
-        (layer_idx, block_type) 위치별로 16bit toggle rate + static probability(Q8.8 기준)를
-        forward마다 기록만 함. tensor 저장 없음.
-        run_glue.py에서 evaluate() 종료 후 saif_write_pass1_report()를 호출해
-        위치별 수렴 forward 수(K)와 참고용 medoid forward_idx를 report로 남김.
+        SAIF 대표 tensor 선정을 위한 profiling 전용 forward.
+        - saif_stage == 'pass1' : (layer_idx, block_type) 위치별 activity
+          (16bit toggle rate + static probability, Q8.8 기준)만 누적 수집. tensor 저장 없음.
+        - saif_stage == 'pass2' : pass1에서 선정된 대표 forward_idx와 일치할 때만
+          실제 input/mean/invsqrt/normalized .pt 저장.
         반환값은 forward_fxp88과 동일한 SW golden 결과 (accuracy 영향 없음).
         """
         key = (self.layer_idx, self.block_type)
@@ -773,16 +787,29 @@ class Custom_LayerNorm(Module):
         input_fx16 = torch.floor(input * scale_factor_8)/scale_factor_8
         input_fx16 = torch.clip(input_fx16, -2**7, 2**7 - 1/scale_factor_8)
 
-        # ── activity(toggle rate + static probability) 계산 ──
-        q = torch.round(input_fx16 * scale_factor_8).to(torch.int32)
-        u = q & 0xFFFF  # Q8.8 값의 16bit two's-complement bit pattern (RTL 표현과 동일)
+        do_save_this_forward = False
+        if self.saif_stage == 'pass1':
+            # ── activity(toggle rate + static probability) 계산 ──
+            q = torch.round(input_fx16 * scale_factor_8).to(torch.int32)
+            u = q & 0xFFFF  # Q8.8 값의 16bit two's-complement bit pattern (RTL 표현과 동일)
 
-        xor = u[:, :, 1:] ^ u[:, :, :-1]  # feature(col) 방향 인접 bit 변화
-        toggle = torch.stack([((xor >> bit) & 1).float().mean() for bit in range(16)])
-        p1 = torch.stack([((u >> bit) & 1).float().mean() for bit in range(16)])
-        activity = torch.cat([toggle, p1]).detach().cpu()  # 32-dim
+            # feature(col) 방향 인접 bit 변화 : feature k -> feature k+1
+            xor = u[:, :, 1:] ^ u[:, :, :-1]
+            toggle = torch.stack([((xor >> bit) & 1).float().mean() for bit in range(16)])
+            p1 = torch.stack([((u >> bit) & 1).float().mean() for bit in range(16)])
+            activity = torch.cat([toggle, p1]).detach().cpu()  # 32-dim
 
-        Custom_LayerNorm._saif_log.setdefault(key, {})[forward_idx] = activity
+            Custom_LayerNorm._saif_sum[key] = Custom_LayerNorm._saif_sum.get(key, 0) + activity
+            Custom_LayerNorm._saif_count[key] = Custom_LayerNorm._saif_count.get(key, 0) + 1
+            Custom_LayerNorm._saif_log.setdefault(key, {})[forward_idx] = activity
+
+        elif self.saif_stage == 'pass2':
+            rep_idx = Custom_LayerNorm._saif_representative.get(key)
+            layer_selected = (Custom_LayerNorm.saif_target_layers is None) or (self.layer_idx in Custom_LayerNorm.saif_target_layers)
+            do_save_this_forward = layer_selected and (rep_idx is not None) and (forward_idx == rep_idx)
+            if do_save_this_forward:
+                print(f"[SAIF pass2] layer{self.layer_idx}_{self.block_type} forward#{forward_idx} 대표 tensor 저장")
+                self._save_fxp_tensor(input_fx16, 'input')
 
         # ── 이하 forward_fxp88과 동일한 SW golden 연산 (accuracy 영향 없이 그대로 흘림) ──
         acc_sum = torch.sum(input_fx16, dim=-1, keepdim=True)
@@ -825,6 +852,11 @@ class Custom_LayerNorm(Module):
         normalized = torch.floor(normalized * scale_factor_8)/scale_factor_8
         normalized = torch.clip(normalized, -2**7, 2**7 - 1/scale_factor_8)
 
+        if do_save_this_forward:
+            self._save_fxp_tensor(mean, 'mean')
+            self._save_fxp_tensor(invsqrt, 'invsqrt')
+            self._save_fxp_tensor(normalized, 'normalized')
+
         if self.weight is not None:
             weight = torch.floor(self.weight * scale_factor_8)/scale_factor_8
             weight = torch.clip(weight, -2**7, 2**7 - 1/scale_factor_8)
@@ -843,17 +875,6 @@ class Custom_LayerNorm(Module):
         out = torch.clip(out, -2**7, 2**7 - 1/scale_factor_8)
 
         return out
-
-    # ── SAIF profiling pass2 : 아직 미구현 ──────────────────────────
-    def forward_profiling_pass2(self, input: Tensor) -> Tensor:
-        """
-        TODO: pass1 report의 convergence_forward_count(K)를 보고 저장 방식을 정한 뒤 구현.
-        - K가 작으면: 대표 forward 여러 개를 이어붙여 그대로 SAIF 대상으로 저장
-        - K가 크면: medoid 1개(+low/high) 방식으로 저장
-        """
-        raise NotImplementedError(
-            "forward_profiling_pass2: pass1 결과(convergence_forward_count)를 보고 구현 예정"
-        )
 
     def forward_original(self, input: Tensor) -> Tensor:
         return F.layer_norm(input, self.normalized_shape, self.weight, self.bias, self.eps)

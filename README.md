@@ -10,6 +10,8 @@ fpga환경에서 HIL 환경 구축
     - HIL 환경 overview (Host PC ↔ ZCU111 board ) 설명 [`링크`](https://github.com/heo-ji/layernorm_HW/blob/main/doc/README_FPGA_overview.md)
 
 ---
+# 코드 변경기록
+./transformer/src/README.md 기록
 
 # 사전 준비
 1. SW BERT 모델
