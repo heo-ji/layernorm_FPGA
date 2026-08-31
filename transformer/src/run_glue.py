@@ -257,11 +257,7 @@ class ModelArguments:
     )
     ###추가함
     tensor_save_dir: Optional[str] = field(
-        default="GLUEtask_tensor", metadata={"help": "forward_fxp88 중간 텐서 저장 경로"}
-    )
-    ###추가함 (SAIF profiling, layernorm_method='profiling_pass1' 사용 시)
-    saif_report_dir: Optional[str] = field(
-        default="saif_convergence_report", metadata={"help": "pass1 수렴(K) report(json, task별 파일) 저장 경로 (run_glue.py 기준 상대경로)"}
+        default="GLUEtask_tensor", metadata={"help": "forward_fxp88 중간 텐서 저장 경로 (profiling_pass1의 수렴 report도 이 경로에 저장됨)"}
     )
 
 
@@ -642,7 +638,7 @@ def main():
             trainer.evaluate(eval_dataset=eval_dataset)
 
             report, save_path = Custom_LayerNorm.saif_write_pass1_report(
-                task_name=data_args.task_name, report_dir=model_args.saif_report_dir
+                task_name=data_args.task_name, report_dir=model_args.tensor_save_dir
             )
             logger.info(f"[SAIF pass1] report 저장: {save_path}")
             for tag, info in report.items():

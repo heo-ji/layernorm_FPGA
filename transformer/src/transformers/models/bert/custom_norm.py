@@ -868,7 +868,7 @@ class Custom_LayerNorm(Module):
         #input = 8.8
         input_fx16 = torch.floor(input * scale_factor_8)/scale_factor_8 #소수부8
         input_fx16 = torch.clip(input_fx16, -2**7, 2**7 - 1/scale_factor_8) #정수부8.8
-        self._save_fxp_tensor(input_fx16, 'input')
+        # self._save_fxp_tensor(input_fx16, 'input')
 
         acc_sum = torch.sum(input_fx16, dim=-1, keepdim=True)
         #acc_sum = 26bit(18.8)
@@ -884,7 +884,7 @@ class Custom_LayerNorm(Module):
         #mean = 16bit(8.8)로 만들기 = saturation
         mean = torch.clip(mean, -2**7, 2**7 - 1/scale_factor_8) #정수부8.8
         mean = torch.floor(mean * scale_factor_8)/scale_factor_8 #소수부8
-        self._save_fxp_tensor(mean, 'mean')
+        # self._save_fxp_tensor(mean, 'mean')
 
         #분산계산
         #X^2 = 32bit(16.16) (8.8의 제곱)
@@ -941,14 +941,14 @@ class Custom_LayerNorm(Module):
         #inverse square root = 8.8
         invsqrt = torch.floor(invsqrt * scale_factor_8)/scale_factor_8
         invsqrt = torch.clip(invsqrt, -2**7, 2**7 - 1/scale_factor_8)
-        self._save_fxp_tensor(invsqrt, 'invsqrt')
+        # self._save_fxp_tensor(invsqrt, 'invsqrt')
 
         # 8.8  * 8.8 = 16.16
         normalized = (input_fx16 - mean) * invsqrt
         #normalized = 8.8
         normalized = torch.floor(normalized * scale_factor_8)/scale_factor_8 #소수부8
         normalized = torch.clip(normalized, -2**7, 2**7 - 1/scale_factor_8) #정수부8
-        self._save_fxp_tensor(normalized, 'normalized')
+        # self._save_fxp_tensor(normalized, 'normalized')
 
         if self.weight is not None:
             #self.weight = 8.8

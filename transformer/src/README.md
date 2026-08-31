@@ -31,8 +31,7 @@ python3 run_glue.py \
 | `--softmax_method` | `"original"` | ModelArguments | softmax 방식: `cordic`(사용 x) / `base2` / `original` |
 | `--hidden_act` | `"gelu"` | ModelArguments | GELU 방식: `gelu` 또는 `CustomGELU` |
 | `--layernorm_method` | `"original"` | ModelArguments | LayerNorm 방식: `original` / `custom_invsqrt_norm` / `dualpath_norm` / `hw_mode1` / `hw_mode2` / `profiling_pass1` / `profiling_pass2` |
-| `--tensor_save_dir` | `"GLUEtask_tensor"` | ModelArguments | forward_fxp88 중간 텐서 저장 경로 (아래 섹션 참고) |
-| `--saif_report_dir` | `"saif_convergence_report"` | ModelArguments | `profiling_pass1` 수렴(K) report 저장 경로 (아래 SAIF profiling 섹션 참고) |
+| `--tensor_save_dir` | `"GLUEtask_tensor"` | ModelArguments | forward_fxp88 중간 텐서 저장 경로. `profiling_pass1`의 수렴(K) report도 이 경로에 저장됨 (아래 섹션 참고) |
 
 ---
 
@@ -117,26 +116,24 @@ BERT 각 LayerNorm 위치(layer × atten/ffn, 24곳)마다 SAIF에 넣을 대표
 몇 forward까지 봐야 안정되는지(수렴 forward 수 K)를 확인하기 위한 SW 전용 프로파일링.
 [transformers/models/bert/custom_norm.py](transformers/models/bert/custom_norm.py)에 구현.
 
-```bash
-./run_glue_models.sh            # 기존과 동일 (custom_invsqrt_norm, tensor 저장)
-./run_glue_models.sh profiling   # profiling_pass1 (task별 수렴 report만 생성, tensor 저장 없음)
-```
+`run_glue_models.sh`의 for문 안 `--layernorm_method` 값을 `profiling_pass1`로 직접 바꿔서 실행
+(옵션 목록은 스크립트 맨 아래 주석 참고).
 
 ## pass1 (`--layernorm_method profiling_pass1`, `Custom_LayerNorm.forward_profiling_pass1`)
 
 - 위치별로 LayerNorm 입력을 Q8.8로 변환 후, feature(col) 방향 인접 bit toggle rate(16개) +
-  static probability(16개) = 32차원 activity vector를 forward마다 기록만 함 (tensor 저장 없음).
+  static probability(16개) = 32차원 activity vector를 forward마다 기록만 함 (`.pt` tensor 저장 없음).
 - `trainer.evaluate()` 종료 후 `Custom_LayerNorm.saif_write_pass1_report()`가
   forward 1, 2, 4, 8, 16, 32, ... 개 누적했을 때의 running-mean activity를
   전체 평균과 비교해서, 그 이후로 계속 오차(epsilon, 기본 0.005) 이내에 머무는
   가장 작은 forward 개수(`convergence_forward_count`, K)를 위치별로 계산.
   참고용으로 전체 평균에 가장 가까운 실제 forward(`medoid_forward_idx`)도 같이 기록.
-- 결과는 `{saif_report_dir}/{task_name}_convergence.json`에 저장 (task별로 파일 분리되므로
-  `run_glue_models.sh profiling`으로 여러 task를 루프 돌리면 task별 report가 각각 생김).
+- 결과는 `--tensor_save_dir`로 넘긴 경로에 `{task_name}_convergence.json`으로 저장
+  (task별로 파일 분리되므로 `run_glue_models.sh`로 여러 task를 루프 돌리면 task별 report가 각각 생김).
 
 ```
-saif_convergence_report/mnli_convergence.json
-saif_convergence_report/sst2_convergence.json
+GLUEtask_tensor/mnli/mnli_convergence.json
+GLUEtask_tensor/sst2/sst2_convergence.json
 ...
 ```
 
