@@ -36,7 +36,8 @@ do
     --hidden_act "CustomGELU" \
     --layernorm_method "profiling_pass1" \
     --tensor_save_dir $TENSOR_DIR/${task_names[$i]}/ \
-    --eval_accumulation_steps 50
+    --eval_accumulation_steps 5 \
+    --per_device_eval_batch_size 16
     
 done
 #--per_device_eval_batch_size 32  batch=8 기준 K의 1/4 정도로 작게 나올 가능성이 높음, -> 일단 8로 해보고  , 실제 샘플 개수로 환산하면(K × batch_size) 둘 다 거의 같은 숫자
