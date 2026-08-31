@@ -29,8 +29,9 @@ do
     --model_name_or_path ${model_paths[$i]} \
     --task_name ${task_names[$i]} \
     --do_eval \
+    --output_dir $DIR/${task_names[$i]}/ \
+    --overwrite_output_dir \
     --max_seq_length 128 \
-    
     --softmax_method "base2"  \
     --hidden_act "CustomGELU" \
     --layernorm_method "profiling_pass1" \
@@ -39,8 +40,7 @@ do
     
 done
 #--per_device_eval_batch_size 32  batch=8 기준 K의 1/4 정도로 작게 나올 가능성이 높음, -> 일단 8로 해보고  , 실제 샘플 개수로 환산하면(K × batch_size) 둘 다 거의 같은 숫자
-#    --output_dir $DIR/${task_names[$i]}/ \
-#    --overwrite_output_dir \
+\
 
 
 #--eval_accumulation_steps 50 colab에서 cpu ram가득차는것 방지
