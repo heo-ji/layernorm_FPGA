@@ -1,5 +1,15 @@
 #!/bin/bash
 
+# Task,Validation 샘플 수,Batch Size = 16,Batch Size = 8
+# CoLA,"1,043개",66 배치,131 배치
+# MNLI (matched),"9,815개",614 배치,"1,227 배치"
+# MRPC,408개,26 배치,51 배치
+# QNLI,"5,463개",342 배치,683 배치
+# QQP,"40,430개","2,527 배치","5,054 배치"
+# RTE,277개,18 배치,35 배치
+# SST-2,872개,55 배치,109 배치
+# STS-B,"1,500개",94 배치,188 배치
+
 # Define arrays of model paths and task names
 model_paths=("ModelTC/bert-base-uncased-cola" \
             "ModelTC/bert-base-uncased-qnli" \

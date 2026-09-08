@@ -494,8 +494,11 @@ class Custom_LayerNorm(Module):
         위치별(layer_idx, block_type)로 forward를 몇 개까지 누적해야
         running-mean activity가 전체 평균의 epsilon 이내로 수렴해서
         이후 다시 벗어나지 않는지(convergence_forward_count = K)를 계산하고,
-        참고용으로 전체 평균에 가장 가까운 실제 forward(medoid)도 같이 기록해서
-        {report_dir}/{task_name}_convergence.json 으로 저장.
+        참고용으로 전체 평균에 가장 가까운 실제 forward(medoid)와 전체 평균 activity
+        vector(mean_activity, 32차원 - toggle rate 16 + static probability 16)도
+        같이 기록해서 {report_dir}/{task_name}_convergence.json 으로 저장.
+        mean_activity는 위치 간 유사도 비교(예: layer 3~6이 실제로 비슷한 activity를
+        갖는지)에 씀 - K는 위치 내부의 수렴 속도일 뿐 위치 간 유사도를 말해주지 않음.
         """
         report = {}
         for key, log in cls._saif_log.items():
@@ -529,6 +532,7 @@ class Custom_LayerNorm(Module):
                 "epsilon": epsilon,
                 "medoid_forward_idx": forward_ids[best_pos],
                 "medoid_distance": float(dist_per_forward[best_pos]),
+                "mean_activity": final_mean.tolist(),
                 "dist_to_final_by_forward_count": {
                     str(n): float(dist_to_final[n - 1]) for n in checkpoints
                 },
