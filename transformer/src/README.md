@@ -31,7 +31,9 @@ python3 run_glue.py \
 | `--softmax_method` | `"original"` | ModelArguments | softmax 방식: `cordic`(사용 x) / `base2` / `original` |
 | `--hidden_act` | `"gelu"` | ModelArguments | GELU 방식: `gelu` 또는 `CustomGELU` |
 | `--layernorm_method` | `"original"` | ModelArguments | LayerNorm 방식: `original` / `custom_invsqrt_norm` / `dualpath_norm` / `hw_mode1` / `hw_mode2` / `profiling_pass1` / `profiling_pass2` |
-| `--tensor_save_dir` | `"GLUEtask_tensor"` | ModelArguments | forward_fxp88 중간 텐서 저장 경로. `profiling_pass1`의 수렴(K) report도 이 경로에 저장됨 (아래 섹션 참고) |
+| `--tensor_save_dir` | `"GLUEtask_tensor"` | ModelArguments | forward_fxp88 중간 텐서 저장 경로. `profiling_pass1`의 수렴(K) report, `profiling_pass2`의 대표 tensor도 이 경로에 저장됨 (아래 섹션 참고) |
+| `--saif_pass2_layers` | `"0,1,5,9,11"` | ModelArguments | `profiling_pass2`에서 tensor를 저장할 layer_idx 목록 (comma-separated) |
+| `--saif_pass2_k` | `40` | ModelArguments | `profiling_pass2`에서 위치별로 저장할 forward 개수 (forward #0~K-1을 이어붙여 저장) |
 
 ---
 
@@ -125,9 +127,12 @@ BERT 각 LayerNorm 위치(layer × atten/ffn, 24곳)마다 SAIF에 넣을 대표
   static probability(16개) = 32차원 activity vector를 forward마다 기록만 함 (`.pt` tensor 저장 없음).
 - `trainer.evaluate()` 종료 후 `Custom_LayerNorm.saif_write_pass1_report()`가
   forward 1, 2, 4, 8, 16, 32, ... 개 누적했을 때의 running-mean activity를
-  전체 평균과 비교해서, 그 이후로 계속 오차(epsilon, 기본 0.005) 이내에 머무는
-  가장 작은 forward 개수(`convergence_forward_count`, K)를 위치별로 계산.
-  참고용으로 전체 평균에 가장 가까운 실제 forward(`medoid_forward_idx`)도 같이 기록.
+  전체 평균과 비교해서, 그 이후로 계속 오차(epsilon, 기본 0.0005 - 실측 단일-forward
+  노이즈 중앙값(~0.001)의 절반) 이내에 머무는 가장 작은 forward 개수
+  (`convergence_forward_count`, K)를 위치별로 계산.
+  참고용으로 전체 평균에 가장 가까운 실제 forward(`medoid_forward_idx`)와 전체 평균
+  activity vector(`mean_activity`, 32차원)도 같이 기록. `mean_activity`는 위치 간(예: layer끼리)
+  activity가 실제로 비슷한지 비교하는 데 씀 - K는 위치 내부 수렴 속도일 뿐 위치 간 유사도를 말해주지 않음.
 - 결과는 `--tensor_save_dir`로 넘긴 경로에 `{task_name}_convergence.json`으로 저장
   (task별로 파일 분리되므로 `run_glue_models.sh`로 여러 task를 루프 돌리면 task별 report가 각각 생김).
 
@@ -139,11 +144,18 @@ GLUEtask_tensor/sst2/sst2_convergence.json
 
 ## pass2 (`--layernorm_method profiling_pass2`, `Custom_LayerNorm.forward_profiling_pass2`)
 
-**아직 미구현** (호출하면 `NotImplementedError`). pass1 report의 K가 작은지 큰지에 따라
-- K가 작으면: 대표 forward K개를 이어붙여 그대로 SAIF 대상으로 저장
-- K가 크면: medoid(+low/high) 1~3개만 골라 저장
+`--saif_pass2_layers`(기본 `"0,1,5,9,11"`)에 지정한 layer_idx들의 atten+ffn 위치에서,
+forward `#0 ~ (--saif_pass2_k - 1)`(기본 K=40)을 batch 차원으로 이어붙여
+`layer{N}_{atten|ffn}_{input,mean,invsqrt,normalized}.pt`로 `--tensor_save_dir`에 저장.
+(pass1과 달리 매 forward 덮어쓰지 않고, K개를 다 모은 뒤 한 번만 저장.)
 
-중 방식을 정한 뒤 채울 예정.
+- 저장할 layer 선택은 K가 아니라 pass1의 `mean_activity`로 위치 간 실제 유사도를 확인해서 정할 것
+  (atten은 중후반 layer가 서로 비슷해 대표 몇 개로 충분하지만, ffn은 layer 0→1, 4→5 부근에서
+  activity가 크게 바뀌어 여러 구간을 대표해야 함 - 자세한 건 프로파일링 분석 결과 참고).
+- K는 pass1 report의 `convergence_forward_count`를 참고하되, RTL 시뮬레이션이 감당 가능한
+  범위에서 정할 것 (K가 pass1에서 나온 값보다 크게 작으면 medoid 근사에 가까워짐).
+- 필요한 forward 수(K)만큼만 있으면 되므로, run_glue.py가 eval_dataset을
+  `K * per_device_eval_batch_size`개로 잘라서 돎 - 전체 eval set을 다 돌 필요 없음.
 
 ---
 

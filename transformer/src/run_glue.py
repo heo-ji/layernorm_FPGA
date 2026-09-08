@@ -259,6 +259,13 @@ class ModelArguments:
     tensor_save_dir: Optional[str] = field(
         default="GLUEtask_tensor", metadata={"help": "forward_fxp88 중간 텐서 저장 경로 (profiling_pass1의 수렴 report도 이 경로에 저장됨)"}
     )
+    ###추가함 (SAIF profiling, layernorm_method='profiling_pass2' 사용 시)
+    saif_pass2_layers: Optional[str] = field(
+        default="0,1,5,9,11", metadata={"help": "profiling_pass2에서 tensor를 저장할 layer_idx 목록 (comma-separated). 그 layer의 atten+ffn 둘 다 저장됨"}
+    )
+    saif_pass2_k: Optional[int] = field(
+        default=40, metadata={"help": "profiling_pass2에서 위치별로 저장할 forward 개수 (forward #0~K-1을 이어붙여 저장)"}
+    )
 
 
 def main():
@@ -650,6 +657,25 @@ def main():
 
             end_time = time.time()
             logger.info(f"Evaluation latency: {end_time - start_time:.5f} seconds")
+
+        ###추가함 (SAIF profiling pass2: 지정 layer들에서 forward #0~K-1을 이어붙여 실제 tensor 저장)
+        elif model_args.layernorm_method == 'profiling_pass2':
+            from transformers.models.bert.custom_norm import Custom_LayerNorm
+
+            target_layers = {int(x) for x in model_args.saif_pass2_layers.split(',')}
+            k = model_args.saif_pass2_k
+            logger.info(f"[SAIF pass2] layers={sorted(target_layers)} K={k} tensor 저장 중...")
+            Custom_LayerNorm.saif_reset_pass2(target_layers, k, tensor_save_dir=model_args.tensor_save_dir)
+
+            # forward #0~K-1만 있으면 되므로, 그만큼만 잘라서 씀 (전체 eval set을 다 돌 필요 없음)
+            needed_samples = k * training_args.per_device_eval_batch_size
+            pass2_dataset = eval_dataset.select(range(min(needed_samples, len(eval_dataset))))
+
+            trainer.evaluate(eval_dataset=pass2_dataset)
+            Custom_LayerNorm.saif_flush_pass2()  # eval set이 K보다 작아 못 채운 위치가 있으면 여기서 마저 저장
+
+            end_time = time.time()
+            logger.info(f"[SAIF pass2] 완료. Evaluation latency: {end_time - start_time:.5f} seconds")
 
         else:
             # Loop to handle MNLI double evaluation (matched, mis-matched)

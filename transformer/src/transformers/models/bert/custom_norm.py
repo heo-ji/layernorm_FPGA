@@ -429,6 +429,12 @@ class Custom_LayerNorm(Module):
     _saif_forward_idx = -1   # 전체 forward(batch) 카운터. layer0/atten 호출 시 +1
     _saif_log = {}           # {(layer_idx, block_type): {forward_idx: activity(32,)}}
 
+    # ── SAIF profiling pass2용 클래스 변수 ──
+    saif_pass2_layers = None   # 저장할 layer_idx 집합 (예: {0,1,5,9,11}). None이면 전체 layer
+    saif_pass2_k = None        # 위치별로 저장할 forward 개수 (forward #0 ~ K-1)
+    _saif_pass2_buffer = {}    # {(layer_idx, block_type): {name: [tensor, ...]}} - K개 다 모이면 이어붙여서 저장 후 비움
+    _saif_pass2_save_dir = 'GLUEtask_tensor'  # saif_flush_pass2()에서 인스턴스 없이 저장할 때 씀
+
     def __init__(self, normalized_shape: _shape_t, eps: float = 1e-5, method: str = 'original', elementwise_affine: bool = True,
                  bias: bool = True, device=None, dtype=None,
                  layer_idx: int = None, block_type: str = None, task_name: str = None,
@@ -486,6 +492,42 @@ class Custom_LayerNorm(Module):
         """pass1 시작 전 호출. forward 카운터와 activity 로그 초기화."""
         cls._saif_forward_idx = -1
         cls._saif_log = {}
+
+    @classmethod
+    def saif_reset_pass2(cls, target_layers, k: int, tensor_save_dir: str = 'GLUEtask_tensor'):
+        """
+        pass2 시작 전 호출.
+        target_layers: 저장할 layer_idx 목록/집합 (예: {0,1,5,9,11}). None이면 전체 layer.
+        k: 위치별로 저장할 forward 개수 (forward #0 ~ k-1을 이어붙여 저장).
+        """
+        cls._saif_forward_idx = -1
+        cls._saif_pass2_buffer = {}
+        cls.saif_pass2_layers = set(target_layers) if target_layers is not None else None
+        cls.saif_pass2_k = k
+        cls._saif_pass2_save_dir = tensor_save_dir
+
+    @classmethod
+    def saif_flush_pass2(cls):
+        """
+        pass2 종료(trainer.evaluate() 완료) 후 호출.
+        eval set이 K*batch_size보다 작아 forward_idx가 K-1까지 못 간 위치는
+        forward 안에서 자동 저장되지 못하므로, 여기서 모인 만큼만이라도 저장.
+        """
+        for key, buf in list(cls._saif_pass2_buffer.items()):
+            layer_idx, block_type = key
+            n_collected = len(buf['input'])
+            if n_collected == 0:
+                continue
+            os.makedirs(cls._saif_pass2_save_dir, exist_ok=True)
+            for name, tensors in buf.items():
+                combined = torch.cat(tensors, dim=0)
+                save_path = os.path.join(cls._saif_pass2_save_dir, f"layer{layer_idx}_{block_type}_{name}.pt")
+                torch.save(combined, save_path)
+            print(
+                f"[SAIF pass2] layer{layer_idx}_{block_type}: forward #0~{n_collected-1}만 모여서 저장 "
+                f"(요청 K={cls.saif_pass2_k}에 못 미침 - eval set이 더 작았음)"
+            )
+            del cls._saif_pass2_buffer[key]
 
     @classmethod
     def saif_write_pass1_report(cls, task_name: str, report_dir: str = 'saif_convergence_report', epsilon: float = 0.0005):
@@ -848,16 +890,106 @@ class Custom_LayerNorm(Module):
 
         return out
 
-    # ── SAIF profiling pass2 : 아직 미구현 ──────────────────────────
+    # ── SAIF profiling pass2 : 지정한 layer들에서 forward #0~K-1을 이어붙여 저장 ──
     def forward_profiling_pass2(self, input: Tensor) -> Tensor:
         """
-        TODO: pass1 report의 convergence_forward_count(K)를 보고 저장 방식을 정한 뒤 구현.
-        - K가 작으면: 대표 forward 여러 개를 이어붙여 그대로 SAIF 대상으로 저장
-        - K가 크면: medoid 1개(+low/high) 방식으로 저장
+        saif_pass2_layers(예: {0,1,5,9,11})에 속한 layer_idx의 atten/ffn 위치에서만,
+        forward #0 ~ saif_pass2_k-1 의 input/mean/invsqrt/normalized 를 모아뒀다가
+        K개를 다 모으면 (K*B, T, F) 형태로 이어붙여 한 번에 저장.
+        (forward_fxp88과 달리 매 forward마다 덮어쓰지 않고, K개 전부 이어붙인 뒤 한 번만 저장)
+        반환값은 forward_fxp88과 동일한 SW golden 결과 (accuracy 영향 없음).
         """
-        raise NotImplementedError(
-            "forward_profiling_pass2: pass1 결과(convergence_forward_count)를 보고 구현 예정"
-        )
+        key = (self.layer_idx, self.block_type)
+
+        if self.layer_idx == 0 and self.block_type == 'atten':
+            Custom_LayerNorm._saif_forward_idx += 1
+        forward_idx = Custom_LayerNorm._saif_forward_idx
+
+        scale_factor_8 = 2**8
+        scale_factor_16 = 2**16
+
+        #input = 8.8 (RTL과 동일 포맷)
+        input_fx16 = torch.floor(input * scale_factor_8)/scale_factor_8
+        input_fx16 = torch.clip(input_fx16, -2**7, 2**7 - 1/scale_factor_8)
+
+        acc_sum = torch.sum(input_fx16, dim=-1, keepdim=True)
+        acc_sum = torch.floor(acc_sum * scale_factor_8)/scale_factor_8
+        acc_sum = torch.clip(acc_sum, -2**17, 2**17- 1/scale_factor_8)
+
+        mean = acc_sum /2**8
+        mean = torch.floor(mean * scale_factor_8)/scale_factor_8
+        mean = mean *0.33203125
+        mean = torch.clip(mean, -2**7, 2**7 - 1/scale_factor_8)
+        mean = torch.floor(mean * scale_factor_8)/scale_factor_8
+
+        x2 = input_fx16*input_fx16
+        x2 = torch.floor(x2 * scale_factor_8)/scale_factor_8
+
+        acc_sum_x2 = torch.sum(x2, dim=-1, keepdim=True)
+        acc_sum_x2 = torch.floor(acc_sum_x2 * scale_factor_8)/scale_factor_8
+
+        mean_x2 = acc_sum_x2 /2**8
+        mean_x2 = torch.floor(mean_x2 * scale_factor_8)/scale_factor_8
+        mean_x2 = mean_x2 *0.33203125
+        mean_x2 = torch.floor(mean_x2 * scale_factor_16)/scale_factor_16
+        mean_x2 = torch.clip(mean_x2, -2**15, 2**15 - 1/scale_factor_16)
+
+        temp = mean*mean
+        temp = torch.floor(temp * scale_factor_16)/scale_factor_16
+        temp = torch.clip(temp, -2**15, 2**15 - 1/scale_factor_16)
+
+        var = mean_x2 - temp
+        var = torch.floor(var * scale_factor_16)/scale_factor_16
+        var = torch.clip(var, -2**7, 2**7 - 1/scale_factor_16)
+
+        eps = 0.0000152587890625
+        v = var + eps
+        invsqrt = self.invsqrt(v)
+        invsqrt = torch.floor(invsqrt * scale_factor_8)/scale_factor_8
+        invsqrt = torch.clip(invsqrt, -2**7, 2**7 - 1/scale_factor_8)
+
+        normalized = (input_fx16 - mean) * invsqrt
+        normalized = torch.floor(normalized * scale_factor_8)/scale_factor_8
+        normalized = torch.clip(normalized, -2**7, 2**7 - 1/scale_factor_8)
+
+        # ── 지정 layer이고, K개를 아직 다 못 모았으면 이번 forward를 버퍼에 추가 ──
+        is_target = (Custom_LayerNorm.saif_pass2_layers is None) or (self.layer_idx in Custom_LayerNorm.saif_pass2_layers)
+        k = Custom_LayerNorm.saif_pass2_k
+        if is_target and k is not None and forward_idx < k:
+            buf = Custom_LayerNorm._saif_pass2_buffer.setdefault(
+                key, {'input': [], 'mean': [], 'invsqrt': [], 'normalized': []}
+            )
+            buf['input'].append(input_fx16.detach().cpu())
+            buf['mean'].append(mean.detach().cpu())
+            buf['invsqrt'].append(invsqrt.detach().cpu())
+            buf['normalized'].append(normalized.detach().cpu())
+
+            if forward_idx == k - 1:
+                # forward #0~k-1 다 모임 -> batch 차원(dim=0)으로 이어붙여 한 번만 저장
+                for name, tensors in buf.items():
+                    combined = torch.cat(tensors, dim=0)  # (k*B, T, F) or (k*B, T, 1)
+                    self._save_fxp_tensor(combined, name)
+                print(f"[SAIF pass2] layer{self.layer_idx}_{self.block_type}: forward #0~{k-1} 저장 완료 (shape={tuple(combined.shape)})")
+                del Custom_LayerNorm._saif_pass2_buffer[key]
+
+        if self.weight is not None:
+            weight = torch.floor(self.weight * scale_factor_8)/scale_factor_8
+            weight = torch.clip(weight, -2**7, 2**7 - 1/scale_factor_8)
+            out = normalized * weight
+        else:
+            out = normalized
+        out = torch.floor(out * scale_factor_8)/scale_factor_8
+        out = torch.clip(out, -2**7, 2**7 - 1/scale_factor_8)
+
+        if self.bias is not None:
+            bias = torch.floor(self.bias * scale_factor_8)/scale_factor_8
+            bias = torch.clip(bias, -2**7, 2**7 - 1/scale_factor_8)
+            out = out + bias
+
+        out = torch.floor(out * scale_factor_8)/scale_factor_8
+        out = torch.clip(out, -2**7, 2**7 - 1/scale_factor_8)
+
+        return out
 
     def forward_original(self, input: Tensor) -> Tensor:
         return F.layer_norm(input, self.normalized_shape, self.weight, self.bias, self.eps)

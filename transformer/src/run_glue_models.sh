@@ -30,11 +30,11 @@ TENSOR_DIR="/content/drive/MyDrive/bert_output/GLUEtask_tensor" # forward_fxp88 
 #TENSOR_DIR="../../GLUEtask_tensor" # forward_fxp88 중간 텐서 저장 경로 (layernorm_FPGA 바로 아래)
 
 # Loop through each model path and task name
-export NCCL_P2P_DISABLE=1
-export NCCL_IB_DISABLE=1
+# export NCCL_P2P_DISABLE=1
+# export NCCL_IB_DISABLE=1
+#CUDA_VISIBLE_DEVICES=0
 for (( i=0; i<${length}; i++ ))
 do
-    CUDA_VISIBLE_DEVICES=0
     python3 run_glue.py \
     --model_name_or_path ${model_paths[$i]} \
     --task_name ${task_names[$i]} \
@@ -44,18 +44,13 @@ do
     --max_seq_length 128 \
     --softmax_method "base2"  \
     --hidden_act "CustomGELU" \
-    --layernorm_method "profiling_pass1" \
     --tensor_save_dir $TENSOR_DIR/${task_names[$i]}/ \
-    --eval_accumulation_steps 5 \
-    --per_device_eval_batch_size 16
-    
+    --layernorm_method profiling_pass2 \
+    --saif_pass2_layers "0,1,5,9,11" \
+    --saif_pass2_k 40
 done
-#--per_device_eval_batch_size 32  batch=8 기준 K의 1/4 정도로 작게 나올 가능성이 높음, -> 일단 8로 해보고  , 실제 샘플 개수로 환산하면(K × batch_size) 둘 다 거의 같은 숫자
-\
-
-
-#--eval_accumulation_steps 50 colab에서 cpu ram가득차는것 방지
-
+#--per_device_eval_batch_size 16  batch=8 기준 K의 1/4 정도로 작게 나올 가능성이 높음, -> 일단 8로 해보고  , 실제 샘플 개수로 환산하면(K × batch_size) 둘 다 거의 같은 숫자
+#--eval_accumulation_steps 5 colab에서 cpu ram가득차는것 방지
 #--max_eval_samples 200 코드가 제대로 도는지, report가 잘 생기는지만 빠르게 확인하고 싶은 스모크 테스트 용도
 
 # ──────────────────────────────────────────────────────────────────
@@ -79,4 +74,6 @@ done
 #                         (layer x atten/ffn) activity(toggle rate+static prob)만 기록하다가
 #                         eval 끝나면 --tensor_save_dir 에 {task_name}_convergence.json 저장
 #                         (forward 수를 늘려가며 activity가 수렴하는 지점 K 확인용)
-#   profiling_pass2     : 아직 미구현 (forward_profiling_pass2, NotImplementedError)
+#   profiling_pass2     : --saif_pass2_layers (예: "0,1,5,9,11") 에 지정한 layer들의 atten+ffn에서
+#                         forward #0~(--saif_pass2_k - 1)를 이어붙여 layer{N}_{atten|ffn}_{input,mean,invsqrt,normalized}.pt
+#                         로 저장 (--tensor_save_dir 기준). 정확도 보는거 아니고, forward K개만 필요하므로 eval set도 K*batch_size개로 앞에서부터 딱 그만큼만 잘라낸 작은 데이터셋을 만들어서 그걸 trainer.evaluate()에 넘깁잘라서 돎
