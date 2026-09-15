@@ -530,7 +530,7 @@ class Custom_LayerNorm(Module):
             del cls._saif_pass2_buffer[key]
 
     @classmethod
-    def saif_write_pass1_report(cls, task_name: str, report_dir: str = 'saif_convergence_report', epsilon: float = 0.0005):
+    def saif_write_pass1_report(cls, task_name: str, report_dir: str = 'saif_convergence_report', epsilon: float = 0.005):
         """
         pass1(전체 eval) 종료 후 호출.
         위치별(layer_idx, block_type)로 forward를 몇 개까지 누적해야

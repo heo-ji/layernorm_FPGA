@@ -46,8 +46,8 @@ do
     --hidden_act "CustomGELU" \
     --tensor_save_dir $TENSOR_DIR/${task_names[$i]}/ \
     --layernorm_method profiling_pass2 \
-    --saif_pass2_layers "0,1,5,9,11" \
-    --saif_pass2_k 40
+    --saif_pass2_layers "0,1,2,3,4,5,6,7,8,9,10" \
+    --saif_pass2_k 10
 done
 #--per_device_eval_batch_size 16  batch=8 기준 K의 1/4 정도로 작게 나올 가능성이 높음, -> 일단 8로 해보고  , 실제 샘플 개수로 환산하면(K × batch_size) 둘 다 거의 같은 숫자
 #--eval_accumulation_steps 5 colab에서 cpu ram가득차는것 방지
