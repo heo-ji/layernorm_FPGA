@@ -11,16 +11,16 @@
 # STS-B,"1,500개",94 배치,188 배치
 
 # Define arrays of model paths and task names
-model_paths=("ModelTC/bert-base-uncased-cola" \
-            "ModelTC/bert-base-uncased-qnli" \
+model_paths=("ModelTC/bert-base-uncased-qnli" \
             "ModelTC/bert-base-uncased-qqp" \
             "ModelTC/bert-base-uncased-rte" \
+            "ModelTC/bert-base-uncased-cola" \
             "ModelTC/bert-base-uncased-sst2" \
             "ModelTC/bert-base-uncased-stsb" \
             "ModelTC/bert-base-uncased-mnli" \
             "ModelTC/bert-base-uncased-mrpc")
 
-task_names=("cola" "qnli" "qqp" "rte" "sst2" "stsb" "mnli" "mrpc")
+task_names=("qnli" "qqp" "rte" "cola" "sst2" "stsb" "mnli" "mrpc")
 
 # Ensure both arrays have the same length
 length=${#model_paths[@]}
@@ -33,7 +33,8 @@ TENSOR_DIR="/content/drive/MyDrive/bert_output/GLUEtask_tensor" # forward_fxp88 
 # export NCCL_P2P_DISABLE=1
 # export NCCL_IB_DISABLE=1
 #CUDA_VISIBLE_DEVICES=0
-for (( i=0; i<${length}; i++ ))
+#for (( i=0; i<${length}; i++ ))
+for (( i=0; i<3; i++ ))
 do
     python3 run_glue.py \
     --model_name_or_path ${model_paths[$i]} \
