@@ -26,15 +26,15 @@ task_names=("qnli" "qqp" "rte" "cola" "sst2" "stsb" "mnli" "mrpc")
 length=${#model_paths[@]}
 
 DIR="../../result_bert_base" # bert_base (layernorm_FPGA 바로 아래)
-TENSOR_DIR="/content/drive/MyDrive/bert_output/GLUEtask_tensor" # forward_fxp88 중간 텐서 저장 경로 (드라이브
-#TENSOR_DIR="../../GLUEtask_tensor" # forward_fxp88 중간 텐서 저장 경로 (layernorm_FPGA 바로 아래)
+#TENSOR_DIR="/content/drive/MyDrive/bert_output/GLUEtask_tensor" # forward_fxp88 중간 텐서 저장 경로 (드라이브
+TENSOR_DIR="../../PyTorch_BERT_Base_trace" # 텐서 저장 경로 (layernorm_FPGA 바로 아래)
 
 # Loop through each model path and task name
 # export NCCL_P2P_DISABLE=1
 # export NCCL_IB_DISABLE=1
 #CUDA_VISIBLE_DEVICES=0
-#for (( i=0; i<${length}; i++ ))
-for (( i=0; i<3; i++ ))
+#nvidia-smi
+for (( i=0; i<${length}; i++ ))
 do
     python3 run_glue.py \
     --model_name_or_path ${model_paths[$i]} \
@@ -45,10 +45,11 @@ do
     --max_seq_length 128 \
     --softmax_method "base2"  \
     --hidden_act "CustomGELU" \
-    --tensor_save_dir $TENSOR_DIR/${task_names[$i]}/ \
+    --tensor_save_dir $TENSOR_DIR/${task_names[$i]}/tensor/ \
     --layernorm_method profiling_pass2 \
-    --saif_pass2_layers "0,1,2,3,4,5,6,7,8,9,10" \
-    --saif_pass2_k 10
+    --saif_pass2_layers "0,1,2,3,4,5,6,7,8,9,10,11" \
+    --saif_pass2_k 10 \
+    --max_eval_samples 200
 done
 #--per_device_eval_batch_size 16  batch=8 기준 K의 1/4 정도로 작게 나올 가능성이 높음, -> 일단 8로 해보고  , 실제 샘플 개수로 환산하면(K × batch_size) 둘 다 거의 같은 숫자
 #--eval_accumulation_steps 5 colab에서 cpu ram가득차는것 방지
