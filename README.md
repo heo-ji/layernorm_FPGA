@@ -44,6 +44,8 @@ layernorm_FPGA\transformer\
 python3 -m venv bert_fpga_proj_env
 source bert_fpga_proj_env/bin/activate
 
+python3 -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+
 #실행
 cd ~/gitrepository/layernorm_FPGA/transformer
 python3 -m pip install -e .
