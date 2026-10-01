@@ -57,6 +57,9 @@ bash run_glue_models.sh
 
 
 # pip install -e . //global python에서 하지 않도록 주의!
+오류나면
+#python3 -m pip install scikit-learn scipy
+#python3 -m pip install accelerate==0.34.2
 ```
 
 2. Bitstream, PS 제어코드 준비
