@@ -15,6 +15,7 @@ fpga환경에서 HIL 환경 구축
 
 # 사전 준비
 1. SW BERT 모델
+    : 테스트벡터 뽑을때, 데이터 프로파일링할때 사용 
 ```
 [e2e-bert-accel-SW] repository의 "transformers"에서 custom_norm.py, run_glue.py수정 한것임
 
@@ -39,13 +40,21 @@ layernorm_FPGA\transformer\
     ├── run_glue_FXP_sst2.sh
 ```
 ```
-conda create -n bert_hw python=3.10
-conda activate bert_hw
+#가상환경 생성&실행 (conda, docker환경 등...)
+python3 -m venv bert_fpga_proj_env
+source bert_fpga_proj_env/bin/activate
 
-cd transformer
-pip install -e . //global python에서 하지 않도록 주의!
+#실행
+cd ~/gitrepository/layernorm_FPGA/transformer
+python3 -m pip install -e .
+python3 -m pip install evaluate
+python3 -m pip uninstall -y peft
+
 cd src
-bash run_glue_FXP_sst2.sh
+bash run_glue_models.sh
+
+
+# pip install -e . //global python에서 하지 않도록 주의!
 ```
 
 2. Bitstream, PS 제어코드 준비
