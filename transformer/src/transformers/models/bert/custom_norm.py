@@ -432,6 +432,8 @@ class Custom_LayerNorm(Module):
     # ── SAIF profiling pass2용 클래스 변수 ──
     saif_pass2_layers = None   # 저장할 layer_idx 집합 (예: {0,1,5,9,11}). None이면 전체 layer
     saif_pass2_k = None        # 위치별로 저장할 forward 개수 (forward #0 ~ K-1)
+    _saif_pass2_representatives = None  # {(layer_idx, block_type): original forward index}
+    _saif_pass2_saved = set()
     _saif_pass2_buffer = {}    # {(layer_idx, block_type): {name: [tensor, ...]}} - K개 다 모이면 이어붙여서 저장 후 비움
     _saif_pass2_save_dir = 'GLUEtask_tensor'  # saif_flush_pass2()에서 인스턴스 없이 저장할 때 씀
 
@@ -494,17 +496,31 @@ class Custom_LayerNorm(Module):
         cls._saif_log = {}
 
     @classmethod
-    def saif_reset_pass2(cls, target_layers, k: int, tensor_save_dir: str = 'GLUEtask_tensor'):
+    def saif_reset_pass2(cls, target_layers, k: int, tensor_save_dir: str = 'GLUEtask_tensor', representative_forwards=None):
         """
         pass2 시작 전 호출.
         target_layers: 저장할 layer_idx 목록/집합 (예: {0,1,5,9,11}). None이면 전체 layer.
-        k: 위치별로 저장할 forward 개수 (forward #0 ~ k-1을 이어붙여 저장).
+        k: legacy mode의 forward 개수. representative_forwards가 있으면 사용하지 않음.
+        representative_forwards: 위치별로 저장할 원래 배치 forward 인덱스 (0-based).
         """
         cls._saif_forward_idx = -1
         cls._saif_pass2_buffer = {}
         cls.saif_pass2_layers = set(target_layers) if target_layers is not None else None
         cls.saif_pass2_k = k
         cls._saif_pass2_save_dir = tensor_save_dir
+        cls._saif_pass2_representatives = dict(representative_forwards) if representative_forwards is not None else None
+        cls._saif_pass2_saved = set()
+
+    def _saif_save_representative(self, key, forward_idx, tensors):
+        """Save all four tensors immediately at this position's selected batch."""
+        targets = Custom_LayerNorm._saif_pass2_representatives
+        if targets.get(key) != forward_idx or key in Custom_LayerNorm._saif_pass2_saved:
+            return
+        for name, tensor in tensors.items():
+            self._save_fxp_tensor(tensor, name)
+        Custom_LayerNorm._saif_pass2_saved.add(key)
+        print(f"[SAIF pass2] layer{key[0]}_{key[1]}: representative forward #{forward_idx} "
+              f"저장 완료 (input shape={tuple(tensors['input'].shape)})")
 
     @classmethod
     def saif_flush_pass2(cls):
@@ -513,6 +529,13 @@ class Custom_LayerNorm(Module):
         eval set이 K*batch_size보다 작아 forward_idx가 K-1까지 못 간 위치는
         forward 안에서 자동 저장되지 못하므로, 여기서 모인 만큼만이라도 저장.
         """
+        if cls._saif_pass2_representatives is not None:
+            missing = set(cls._saif_pass2_representatives) - cls._saif_pass2_saved
+            if missing:
+                tags = [f"layer{layer}_{block} (forward #{cls._saif_pass2_representatives[(layer, block)]})"
+                        for layer, block in sorted(missing)]
+                raise RuntimeError("Representative pass2 did not save all requested positions: " + ", ".join(tags))
+            return
         for key, buf in list(cls._saif_pass2_buffer.items()):
             layer_idx, block_type = key
             n_collected = len(buf['input'])
@@ -890,10 +913,11 @@ class Custom_LayerNorm(Module):
 
         return out
 
-    # ── SAIF profiling pass2 : 지정한 layer들에서 forward #0~K-1을 이어붙여 저장 ──
+    # ── SAIF pass2: representative batch per position, or legacy first-K batches ──
     def forward_profiling_pass2(self, input: Tensor) -> Tensor:
         """
-        saif_pass2_layers(예: {0,1,5,9,11})에 속한 layer_idx의 atten/ffn 위치에서만,
+        Representative mode: 위치별 지정 forward 배치 하나를 기존 파일명으로 즉시 저장.
+        Legacy mode: saif_pass2_layers(예: {0,1,5,9,11})에 속한 layer_idx의 atten/ffn 위치에서만,
         forward #0 ~ saif_pass2_k-1 의 input/mean/invsqrt/normalized 를 모아뒀다가
         K개를 다 모으면 (K*B, T, F) 형태로 이어붙여 한 번에 저장.
         (forward_fxp88과 달리 매 forward마다 덮어쓰지 않고, K개 전부 이어붙인 뒤 한 번만 저장)
@@ -955,7 +979,12 @@ class Custom_LayerNorm(Module):
         # ── 지정 layer이고, K개를 아직 다 못 모았으면 이번 forward를 버퍼에 추가 ──
         is_target = (Custom_LayerNorm.saif_pass2_layers is None) or (self.layer_idx in Custom_LayerNorm.saif_pass2_layers)
         k = Custom_LayerNorm.saif_pass2_k
-        if is_target and k is not None and forward_idx < k:
+        if Custom_LayerNorm._saif_pass2_representatives is not None:
+            self._saif_save_representative(key, forward_idx, {
+                'input': input_fx16, 'mean': mean,
+                'invsqrt': invsqrt, 'normalized': normalized,
+            })
+        elif is_target and k is not None and forward_idx < k:
             buf = Custom_LayerNorm._saif_pass2_buffer.setdefault(
                 key, {'input': [], 'mean': [], 'invsqrt': [], 'normalized': []}
             )

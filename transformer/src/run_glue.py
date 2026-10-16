@@ -266,6 +266,10 @@ class ModelArguments:
     saif_pass2_k: Optional[int] = field(
         default=40, metadata={"help": "profiling_pass2에서 위치별로 저장할 forward 개수 (forward #0~K-1을 이어붙여 저장)"}
     )
+    saif_pass2_representative_json: Optional[str] = field(
+        default=None,
+        metadata={"help": "JSON mapping task/layer/block to a 0-based representative forward index. Overrides saif_pass2_k; saves one batch per selected position. Also accepts a task's pass1 convergence JSON."},
+    )
 
 
 def main():
@@ -658,21 +662,54 @@ def main():
             end_time = time.time()
             logger.info(f"Evaluation latency: {end_time - start_time:.5f} seconds")
 
-        ###추가함 (SAIF profiling pass2: 지정 layer들에서 forward #0~K-1을 이어붙여 실제 tensor 저장)
+        ### SAIF pass2: representative batch per position, or legacy first-K batches
         elif model_args.layernorm_method == 'profiling_pass2':
             from transformers.models.bert.custom_norm import Custom_LayerNorm
 
             target_layers = {int(x) for x in model_args.saif_pass2_layers.split(',')}
-            k = model_args.saif_pass2_k
-            logger.info(f"[SAIF pass2] layers={sorted(target_layers)} K={k} tensor 저장 중...")
-            Custom_LayerNorm.saif_reset_pass2(target_layers, k, tensor_save_dir=model_args.tensor_save_dir)
+            representative_forwards = None
+            if model_args.saif_pass2_representative_json:
+                from representative_json_file_checker import load_representative_forwards
 
-            # forward #0~K-1만 있으면 되므로, 그만큼만 잘라서 씀 (전체 eval set을 다 돌 필요 없음)
-            needed_samples = k * training_args.per_device_eval_batch_size
+                # Forward indices refer to the original, sequential, single-device batches.
+                if training_args.world_size != 1 or training_args.n_gpu > 1:
+                    raise ValueError("Representative pass2 requires a single process/device, matching pass1.")
+                if training_args.eval_batch_size != training_args.per_device_eval_batch_size:
+                    raise ValueError("Representative pass2 requires eval_batch_size == per_device_eval_batch_size.")
+                if training_args.dataloader_drop_last:
+                    raise ValueError("Representative pass2 requires dataloader_drop_last=False.")
+                representative_forwards = load_representative_forwards(
+                    model_args.saif_pass2_representative_json,
+                    task_name=data_args.task_name,
+                    target_layers=target_layers,
+                    num_hidden_layers=model.config.num_hidden_layers,
+                    dataset_size=len(eval_dataset),
+                    batch_size=training_args.per_device_eval_batch_size,
+                    max_seq_length=max_seq_length,
+                    pad_to_max_length=data_args.pad_to_max_length,
+                )
+                k = None
+                needed_samples = (max(representative_forwards.values()) + 1) * training_args.per_device_eval_batch_size
+                logger.info(
+                    "[SAIF pass2] representative JSON=%s; saif_pass2_k ignored; positions=%s",
+                    model_args.saif_pass2_representative_json,
+                    {f"layer{layer}_{block}": index for (layer, block), index in sorted(representative_forwards.items())},
+                )
+            else:
+                k = model_args.saif_pass2_k
+                if k is None or k < 1:
+                    raise ValueError("saif_pass2_k must be a positive integer.")
+                needed_samples = k * training_args.per_device_eval_batch_size
+                logger.info(f"[SAIF pass2] layers={sorted(target_layers)} K={k} tensor 저장 중...")
+
+            Custom_LayerNorm.saif_reset_pass2(
+                target_layers, k, tensor_save_dir=model_args.tensor_save_dir,
+                representative_forwards=representative_forwards,
+            )
+            # Keep every preceding batch so the original forward indices stay unchanged.
             pass2_dataset = eval_dataset.select(range(min(needed_samples, len(eval_dataset))))
-
             trainer.evaluate(eval_dataset=pass2_dataset)
-            Custom_LayerNorm.saif_flush_pass2()  # eval set이 K보다 작아 못 채운 위치가 있으면 여기서 마저 저장
+            Custom_LayerNorm.saif_flush_pass2()
 
             end_time = time.time()
             logger.info(f"[SAIF pass2] 완료. Evaluation latency: {end_time - start_time:.5f} seconds")

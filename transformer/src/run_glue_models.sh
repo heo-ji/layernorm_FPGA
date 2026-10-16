@@ -43,13 +43,15 @@ do
     --output_dir $DIR/${task_names[$i]}/ \
     --overwrite_output_dir \
     --max_seq_length 128 \
+    --per_device_eval_batch_size 8 \
     --softmax_method "base2"  \
     --hidden_act "CustomGELU" \
     --tensor_save_dir $TENSOR_DIR/${task_names[$i]}/tensor/ \
     --layernorm_method profiling_pass2 \
     --saif_pass2_layers "0,1,2,3,4,5,6,7,8,9,10,11" \
-    --saif_pass2_k 10 \
-    --max_eval_samples 200
+    --saif_pass2_representative_json "./saif_representative_forwards.json"
+    # --saif_pass2_k 10
+    # --max_eval_samples 200
 done
 #--per_device_eval_batch_size 16  batch=8 기준 K의 1/4 정도로 작게 나올 가능성이 높음, -> 일단 8로 해보고  , 실제 샘플 개수로 환산하면(K × batch_size) 둘 다 거의 같은 숫자
 #--eval_accumulation_steps 5 colab에서 cpu ram가득차는것 방지
@@ -76,6 +78,6 @@ done
 #                         (layer x atten/ffn) activity(toggle rate+static prob)만 기록하다가
 #                         eval 끝나면 --tensor_save_dir 에 {task_name}_convergence.json 저장
 #                         (forward 수를 늘려가며 activity가 수렴하는 지점 K 확인용)
-#   profiling_pass2     : --saif_pass2_layers (예: "0,1,5,9,11") 에 지정한 layer들의 atten+ffn에서
-#                         forward #0~(--saif_pass2_k - 1)를 이어붙여 layer{N}_{atten|ffn}_{input,mean,invsqrt,normalized}.pt
-#                         로 저장 (--tensor_save_dir 기준). 정확도 보는거 아니고, forward K개만 필요하므로 eval set도 K*batch_size개로 앞에서부터 딱 그만큼만 잘라낸 작은 데이터셋을 만들어서 그걸 trainer.evaluate()에 넘깁잘라서 돎
+#   profiling_pass2     : JSON 지정 시 위치별 대표 배치 하나를 기존 파일명으로 저장.
+#                         앞 K개 저장은 위 명령의 마지막 JSON 옵션 줄을 --saif_pass2_k 10 으로 교체.
+#                         대표 JSON 모드에서는 --max_eval_samples로 validation을 제한하지 않음.
