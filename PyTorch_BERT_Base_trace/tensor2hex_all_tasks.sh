@@ -9,5 +9,6 @@ for task in qnli qqp rte cola sst2 stsb mnli mrpc; do
         --parallel_row_num 32 \
         --batch_size 8 \
         --device cuda \
-        --num_forwards 1 5 10 20 30 40
+        --num_forwards 1
+        # --num_forwards 1 5 10 20 30 40
 done

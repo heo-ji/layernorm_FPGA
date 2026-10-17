@@ -245,3 +245,28 @@ Host PC (custom_norm.py)
   weight * normalized + bias
   → 다음 레이어로
   ```
+
+
+---
+
+# SAIF profiling / tensor → hex
+
+- pass1: `--layernorm_method profiling_pass1` → 입력 activity / 수렴 K / 대표 forward 인덱스 JSON
+- pass2 두 가지 지원:
+  1. 누적 K개: `--saif_pass2_k K` → 처음 #0~K-1 배치 연결 저장
+  2. 대표 위치 k: `--saif_pass2_representative_json 파일` → 위치별 지정 인덱스 k의 배치 하나 저장
+- 현재 스크립트: 대표 JSON 활성 / 기존 K 옵션 주석 유지
+- 앞 K개로 전환: 마지막 JSON 옵션 줄을 `--saif_pass2_k 10`으로 교체
+- tensor: `PyTorch_BERT_Base_trace/{task}/tensor/`; 두 방식 모두 기존 파일명 유지
+
+```bash
+# 저장소 루트 기준
+cd transformer/src
+bash run_glue_models.sh
+cd ../../PyTorch_BERT_Base_trace
+bash tensor2hex_all_tasks.sh
+```
+
+- hex 현재 옵션: `--batch_size 8 --num_forwards 1` → `{task}/hex_txt_32x768_k1/`
+- 기존 `--num_forwards 1 5 10 20 30 40`: 주석 유지; 누적 저장한 K 이내에서 사용
+- 상세 옵션 / 변경기록: [transformer/src/README.md](transformer/src/README.md)
